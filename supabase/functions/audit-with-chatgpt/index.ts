@@ -61,9 +61,9 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
-    if (!openaiApiKey) {
-      throw new Error("OPENAI_API_KEY is not configured");
+    const llmApiKey = Deno.env.get("LLM_GATEWAY_KEY");
+    if (!llmApiKey) {
+      throw new Error("LLM_GATEWAY_KEY is not configured");
     }
 
     const { sessionId, auditPrompt, rawData, thresholdData, apiUrl, modelName }: AuditRequest = await req.json();
@@ -72,8 +72,9 @@ Deno.serve(async (req: Request) => {
       throw new Error("Missing required fields");
     }
 
-    const llmApiUrl = apiUrl || "https://api.openai.com/v1";
-    const llmModel = modelName || "gpt-4o-mini";
+    // Use Lite LLM Gateway configuration
+    const llmApiUrl = apiUrl || "https://imllm.intermesh.net/v1";
+    const llmModel = modelName || "qwen/qwen3-32b";
 
     const thresholdMap = new Map(
       thresholdData.map((t) => [t.fk_glcat_mcat_id, t])
@@ -90,8 +91,8 @@ Deno.serve(async (req: Request) => {
         const threshold = thresholdMap.get(record.fk_glcat_mcat_id);
         const thresholdAvailable = !!threshold;
         const segment = record.bl_segment;
-const markedAsRetail = segment?.toLowerCase() === "retail - indian" || 
-                       segment?.toLowerCase() === "retail - foreign";
+        const markedAsRetail = segment?.toLowerCase() === "retail - indian" || 
+                               segment?.toLowerCase() === "retail - foreign";
 
         let mcatType = "Standard MCAT";
         let indiamartOutcome = "PASS";
@@ -178,7 +179,7 @@ DO NOT reference the sheet threshold. Provide your independent commercial assess
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "Authorization": `Bearer ${openaiApiKey}`,
+              "Authorization": `Bearer ${llmApiKey}`,
             },
             body: JSON.stringify({
               model: llmModel,
@@ -192,26 +193,23 @@ DO NOT reference the sheet threshold. Provide your independent commercial assess
             }),
           });
 
-         // Replace it with this enhanced error logging:
-if (!response.ok) {
-  const errorText = await response.text();
-  console.error("OpenAI API Error Status:", response.status);
-  console.error("OpenAI API Error Details:", errorText);
-  
-  // Try to parse the error for more details
-  try {
-    const errorJson = JSON.parse(errorText);
-    console.error("OpenAI Error Code:", errorJson.error?.code);
-    console.error("OpenAI Error Message:", errorJson.error?.message);
-    console.error("OpenAI Error Type:", errorJson.error?.type);
-    console.error("OpenAI Error Param:", errorJson.error?.param);
-  } catch (e) {
-    // If it's not JSON, just log the raw text
-    console.error("Raw error response (not JSON):", errorText);
-  }
-  
-  throw new Error(`OpenAI API error: ${response.status} - ${errorText.substring(0, 200)}`);
-}
+          if (!response.ok) {
+            const errorText = await response.text();
+            console.error("Lite LLM API Error Status:", response.status);
+            console.error("Lite LLM API Error Details:", errorText);
+            
+            // Try to parse the error for more details
+            try {
+              const errorJson = JSON.parse(errorText);
+              console.error("Lite LLM Error Code:", errorJson.error?.code);
+              console.error("Lite LLM Error Message:", errorJson.error?.message);
+            } catch (e) {
+              console.error("Raw error response:", errorText);
+            }
+            
+            throw new Error(`Lite LLM API error: ${response.status} - ${errorText.substring(0, 200)}`);
+          }
+          
           const data = await response.json();
           const content = data.choices[0].message.content;
           const llmResponse = JSON.parse(content);
