@@ -27,6 +27,8 @@ interface AuditRequest {
     leap_retail_qty_cutoff: number;
     gl_unit_name: string;
   }>;
+  apiUrl?: string;
+  modelName?: string;
 }
 
 interface AuditResult {
@@ -59,16 +61,20 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
-    if (!openaiApiKey) {
-      throw new Error("OPENAI_API_KEY is not configured");
+    const llmApiKey = Deno.env.get("LLM_GATEWAY_KEY");
+    if (!llmApiKey) {
+      throw new Error("LLM_GATEWAY_KEY is not configured");
     }
 
-    const { sessionId, auditPrompt, rawData, thresholdData }: AuditRequest = await req.json();
+    const { sessionId, auditPrompt, rawData, thresholdData, apiUrl, modelName }: AuditRequest = await req.json();
 
     if (!sessionId || !auditPrompt || !rawData || !thresholdData) {
       throw new Error("Missing required fields");
     }
+
+    // Use Lite LLM Gateway configuration
+    const llmApiUrl = apiUrl || "https://imllm.intermesh.net/v1";
+    const llmModel = modelName || "openai/gpt-5";
 
     const thresholdMap = new Map(
       thresholdData.map((t) => [t.fk_glcat_mcat_id, t])
@@ -76,7 +82,7 @@ Deno.serve(async (req: Request) => {
 
     const auditResults: AuditResult[] = [];
 
-    const batchSize = 20;
+    const batchSize = 2;
     for (let i = 0; i < rawData.length; i += batchSize) {
       const batch = rawData.slice(i, i + batchSize);
 
@@ -85,8 +91,8 @@ Deno.serve(async (req: Request) => {
         const threshold = thresholdMap.get(record.fk_glcat_mcat_id);
         const thresholdAvailable = !!threshold;
         const segment = record.bl_segment;
-const markedAsRetail = segment?.toLowerCase() === "retail - indian" || 
-                       segment?.toLowerCase() === "retail - foreign";
+        const markedAsRetail = segment?.toLowerCase() === "retail - indian" || 
+                               segment?.toLowerCase() === "retail - foreign";
 
         let mcatType = "Standard MCAT";
         let indiamartOutcome = "PASS";
@@ -169,44 +175,41 @@ Record Details:
 DO NOT reference the sheet threshold. Provide your independent commercial assessment.`;
 
         try {
-          const response = await fetch("https://api.openai.com/v1/chat/completions", {
+          const response = await fetch(`${llmApiUrl}/chat/completions`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "Authorization": `Bearer ${openaiApiKey}`,
+              "Authorization": `Bearer ${llmApiKey}`,
             },
             body: JSON.stringify({
-              model: "gpt-4o-mini",
+              model: llmModel,
               messages: [
                 { role: "system", content: systemPrompt },
                 { role: "user", content: userPrompt },
               ],
               temperature: 0,
-              max_tokens: 600,
+              max_tokens: 500,
               response_format: { type: "json_object" },
             }),
           });
 
-         // Replace it with this enhanced error logging:
-if (!response.ok) {
-  const errorText = await response.text();
-  console.error("OpenAI API Error Status:", response.status);
-  console.error("OpenAI API Error Details:", errorText);
-  
-  // Try to parse the error for more details
-  try {
-    const errorJson = JSON.parse(errorText);
-    console.error("OpenAI Error Code:", errorJson.error?.code);
-    console.error("OpenAI Error Message:", errorJson.error?.message);
-    console.error("OpenAI Error Type:", errorJson.error?.type);
-    console.error("OpenAI Error Param:", errorJson.error?.param);
-  } catch (e) {
-    // If it's not JSON, just log the raw text
-    console.error("Raw error response (not JSON):", errorText);
-  }
-  
-  throw new Error(`OpenAI API error: ${response.status} - ${errorText.substring(0, 200)}`);
-}
+          if (!response.ok) {
+            const errorText = await response.text();
+            console.error("Lite LLM API Error Status:", response.status);
+            console.error("Lite LLM API Error Details:", errorText);
+            
+            // Try to parse the error for more details
+            try {
+              const errorJson = JSON.parse(errorText);
+              console.error("Lite LLM Error Code:", errorJson.error?.code);
+              console.error("Lite LLM Error Message:", errorJson.error?.message);
+            } catch (e) {
+              console.error("Raw error response:", errorText);
+            }
+            
+            throw new Error(`Lite LLM API error: ${response.status} - ${errorText.substring(0, 200)}`);
+          }
+          
           const data = await response.json();
           const content = data.choices[0].message.content;
           const llmResponse = JSON.parse(content);
