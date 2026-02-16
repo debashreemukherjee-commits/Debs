@@ -176,7 +176,7 @@ DO NOT reference the sheet threshold. Provide your independent commercial assess
               "Authorization": `Bearer ${openaiApiKey}`,
             },
             body: JSON.stringify({
-              model: "gpt-5.2",
+              model: "gpt-4o-mini",
               messages: [
                 { role: "system", content: systemPrompt },
                 { role: "user", content: userPrompt },
