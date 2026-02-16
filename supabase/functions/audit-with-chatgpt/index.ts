@@ -76,7 +76,7 @@ Deno.serve(async (req: Request) => {
 
     const auditResults: AuditResult[] = [];
 
-    const batchSize = 20;
+    const batchSize = 2;
     for (let i = 0; i < rawData.length; i += batchSize) {
       const batch = rawData.slice(i, i + batchSize);
 
@@ -182,7 +182,7 @@ DO NOT reference the sheet threshold. Provide your independent commercial assess
                 { role: "user", content: userPrompt },
               ],
               temperature: 0,
-              max_tokens: 600,
+              max_tokens: 500,
               response_format: { type: "json_object" },
             }),
           });
