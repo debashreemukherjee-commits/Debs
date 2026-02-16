@@ -74,7 +74,7 @@ Deno.serve(async (req: Request) => {
 
     // Use Lite LLM Gateway configuration
     const llmApiUrl = apiUrl || "https://imllm.intermesh.net/v1";
-    const llmModel = modelName || "qwen/qwen3-32b";
+    const llmModel = modelName || "openai/gpt-5";
 
     const thresholdMap = new Map(
       thresholdData.map((t) => [t.fk_glcat_mcat_id, t])
