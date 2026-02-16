@@ -13,6 +13,8 @@ function App() {
   const [auditPrompt, setAuditPrompt] = useState<string>(
     'Analyze the retail audit data and verify if buyLeads are correctly classified as retail or non-retail based on the quantity thresholds. Provide detailed reasoning for any misclassifications.'
   );
+  const [apiUrl, setApiUrl] = useState<string>('');
+  const [modelName, setModelName] = useState<string>('gpt-4o-mini');
   const [stage, setStage] = useState<ProcessingStage>('idle');
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [results, setResults] = useState<AuditResult[]>([]);
@@ -123,6 +125,8 @@ function App() {
           auditPrompt: auditPrompt,
           rawData: insertedRawData,
           thresholdData: thresholdInserts,
+          apiUrl: apiUrl || undefined,
+          modelName: modelName || undefined,
         }),
       });
 
@@ -230,6 +234,42 @@ function App() {
                 onFileSelect={setThresholdFile}
                 selectedFile={thresholdFile}
               />
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+              <div>
+                <label htmlFor="apiUrl" className="block text-sm font-medium text-gray-700 mb-2">
+                  LiteLLM API URL (Optional)
+                </label>
+                <input
+                  id="apiUrl"
+                  type="text"
+                  value={apiUrl}
+                  onChange={(e) => setApiUrl(e.target.value)}
+                  placeholder="https://api.your-litellm-provider.com/v1"
+                  className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-teal-500 focus:ring-2 focus:ring-teal-200 transition-colors text-sm text-gray-900"
+                />
+                <p className="mt-2 text-xs text-gray-500">
+                  Leave empty to use default OpenAI API
+                </p>
+              </div>
+
+              <div>
+                <label htmlFor="modelName" className="block text-sm font-medium text-gray-700 mb-2">
+                  Model Name
+                </label>
+                <input
+                  id="modelName"
+                  type="text"
+                  value={modelName}
+                  onChange={(e) => setModelName(e.target.value)}
+                  placeholder="gpt-4o-mini"
+                  className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-teal-500 focus:ring-2 focus:ring-teal-200 transition-colors text-sm text-gray-900"
+                />
+                <p className="mt-2 text-xs text-gray-500">
+                  Specify the model to use for LiteLLM
+                </p>
+              </div>
             </div>
 
             <div className="mb-8">

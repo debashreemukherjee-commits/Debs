@@ -27,6 +27,8 @@ interface AuditRequest {
     leap_retail_qty_cutoff: number;
     gl_unit_name: string;
   }>;
+  apiUrl?: string;
+  modelName?: string;
 }
 
 interface AuditResult {
@@ -64,11 +66,14 @@ Deno.serve(async (req: Request) => {
       throw new Error("OPENAI_API_KEY is not configured");
     }
 
-    const { sessionId, auditPrompt, rawData, thresholdData }: AuditRequest = await req.json();
+    const { sessionId, auditPrompt, rawData, thresholdData, apiUrl, modelName }: AuditRequest = await req.json();
 
     if (!sessionId || !auditPrompt || !rawData || !thresholdData) {
       throw new Error("Missing required fields");
     }
+
+    const llmApiUrl = apiUrl || "https://api.openai.com/v1";
+    const llmModel = modelName || "gpt-4o-mini";
 
     const thresholdMap = new Map(
       thresholdData.map((t) => [t.fk_glcat_mcat_id, t])
@@ -169,14 +174,14 @@ Record Details:
 DO NOT reference the sheet threshold. Provide your independent commercial assessment.`;
 
         try {
-          const response = await fetch("https://api.openai.com/v1/chat/completions", {
+          const response = await fetch(`${llmApiUrl}/chat/completions`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
               "Authorization": `Bearer ${openaiApiKey}`,
             },
             body: JSON.stringify({
-              model: "gpt-4o-mini",
+              model: llmModel,
               messages: [
                 { role: "system", content: systemPrompt },
                 { role: "user", content: userPrompt },
