@@ -82,12 +82,118 @@ Deno.serve(async (req: Request) => {
       return unit.toLowerCase().trim();
     };
 
-    const thresholdMap = new Map(
-      thresholdData.map((t) => {
-        const key = `${t.fk_glcat_mcat_id}_${normalizeUnit(t.gl_unit_name)}`;
-        return [key, t];
-      })
-    );
+    const getUnitCategory = (unit: string): string | null => {
+      const normalized = normalizeUnit(unit);
+      const weightUnits = ["mg", "g", "kg", "tonne", "lbs", "lb", "oz", "ounce"];
+      const volumeUnits = ["ml", "l", "liter", "litre", "gallon", "pint", "cc"];
+      const lengthUnits = ["mm", "cm", "m", "km", "inch", "foot", "yard", "mile"];
+      const countUnits = ["piece", "pieces", "unit", "units", "dozen", "count"];
+
+      if (weightUnits.includes(normalized)) return "weight";
+      if (volumeUnits.includes(normalized)) return "volume";
+      if (lengthUnits.includes(normalized)) return "length";
+      if (countUnits.includes(normalized)) return "count";
+      return null;
+    };
+
+    const convertUnit = (value: number, fromUnit: string, toUnit: string): number => {
+      const from = normalizeUnit(fromUnit);
+      const to = normalizeUnit(toUnit);
+
+      if (from === to) return value;
+
+      const fromCategory = getUnitCategory(from);
+      const toCategory = getUnitCategory(to);
+
+      if (!fromCategory || !toCategory || fromCategory !== toCategory) {
+        return value;
+      }
+
+      const weightConversions: { [key: string]: number } = {
+        "mg": 0.001,
+        "g": 1,
+        "kg": 1000,
+        "tonne": 1000000,
+        "lbs": 453.592,
+        "lb": 453.592,
+        "oz": 28.3495,
+        "ounce": 28.3495,
+      };
+
+      const volumeConversions: { [key: string]: number } = {
+        "ml": 1,
+        "l": 1000,
+        "liter": 1000,
+        "litre": 1000,
+        "cc": 1,
+        "gallon": 3785.41,
+        "pint": 473.176,
+      };
+
+      const lengthConversions: { [key: string]: number } = {
+        "mm": 1,
+        "cm": 10,
+        "m": 1000,
+        "km": 1000000,
+        "inch": 25.4,
+        "foot": 304.8,
+        "yard": 914.4,
+        "mile": 1609344,
+      };
+
+      const countConversions: { [key: string]: number } = {
+        "piece": 1,
+        "pieces": 1,
+        "unit": 1,
+        "units": 1,
+        "dozen": 12,
+        "count": 1,
+      };
+
+      let conversions: { [key: string]: number } = {};
+      if (fromCategory === "weight") conversions = weightConversions;
+      else if (fromCategory === "volume") conversions = volumeConversions;
+      else if (fromCategory === "length") conversions = lengthConversions;
+      else if (fromCategory === "count") conversions = countConversions;
+
+      const fromFactor = conversions[from] || 1;
+      const toFactor = conversions[to] || 1;
+
+      return (value * fromFactor) / toFactor;
+    };
+
+    const thresholdsByMcat = new Map<string, Array<{ threshold: any; unit: string }>>();
+    thresholdData.forEach((t) => {
+      const mcatId = t.fk_glcat_mcat_id;
+      if (!thresholdsByMcat.has(mcatId)) {
+        thresholdsByMcat.set(mcatId, []);
+      }
+      thresholdsByMcat.get(mcatId)!.push({ threshold: t, unit: normalizeUnit(t.gl_unit_name) });
+    });
+
+    const findThreshold = (mcatId: string, auditUnit: string) => {
+      const thresholds = thresholdsByMcat.get(mcatId);
+      if (!thresholds || thresholds.length === 0) return null;
+
+      const normalizedAuditUnit = normalizeUnit(auditUnit);
+      const auditUnitCategory = getUnitCategory(auditUnit);
+
+      for (const { threshold, unit } of thresholds) {
+        if (unit === normalizedAuditUnit) {
+          return threshold;
+        }
+      }
+
+      if (auditUnitCategory) {
+        for (const { threshold, unit } of thresholds) {
+          if (getUnitCategory(unit) === auditUnitCategory) {
+            return threshold;
+          }
+        }
+      }
+
+      return thresholds[0].threshold;
+    };
 
     const auditResults: AuditResult[] = [];
 
@@ -97,11 +203,10 @@ Deno.serve(async (req: Request) => {
 
       const batchPromises = batch.map(async (record) => {
         const businessMcatKey = record.business_mcat_key || 0;
-        const thresholdKey = `${record.fk_glcat_mcat_id}_${normalizeUnit(record.quantity_unit)}`;
-        const threshold = thresholdMap.get(thresholdKey);
+        const threshold = findThreshold(record.fk_glcat_mcat_id, record.quantity_unit);
         const thresholdAvailable = !!threshold;
         const segment = record.bl_segment;
-        const markedAsRetail = segment?.toLowerCase() === "retail - indian" || 
+        const markedAsRetail = segment?.toLowerCase() === "retail - indian" ||
                        segment?.toLowerCase() === "retail - foreign";
 
         let mcatType = "Standard MCAT";
@@ -133,8 +238,9 @@ Deno.serve(async (req: Request) => {
           thresholdValue = "NA";
         } else {
           const quantity = record.quantity;
+          const convertedQuantity = convertUnit(quantity, record.quantity_unit, threshold.gl_unit_name);
           const cutoff = threshold.leap_retail_qty_cutoff;
-          const shouldBeRetail = quantity <= cutoff;
+          const shouldBeRetail = convertedQuantity <= cutoff;
 
           if (shouldBeRetail && markedAsRetail) {
             indiamartCategory = "Retail Correctly Marked";
