@@ -70,8 +70,16 @@ Deno.serve(async (req: Request) => {
       throw new Error("Missing required fields");
     }
 
+    const normalizeUnit = (unit: string): string => {
+      if (!unit) return "";
+      return unit.toLowerCase().trim();
+    };
+
     const thresholdMap = new Map(
-      thresholdData.map((t) => [t.fk_glcat_mcat_id, t])
+      thresholdData.map((t) => {
+        const key = `${t.fk_glcat_mcat_id}_${normalizeUnit(t.gl_unit_name)}`;
+        return [key, t];
+      })
     );
 
     const auditResults: AuditResult[] = [];
@@ -82,7 +90,8 @@ Deno.serve(async (req: Request) => {
 
       const batchPromises = batch.map(async (record) => {
         const businessMcatKey = record.business_mcat_key || 0;
-        const threshold = thresholdMap.get(record.fk_glcat_mcat_id);
+        const thresholdKey = `${record.fk_glcat_mcat_id}_${normalizeUnit(record.quantity_unit)}`;
+        const threshold = thresholdMap.get(thresholdKey);
         const thresholdAvailable = !!threshold;
         const segment = record.bl_segment;
 const markedAsRetail = segment?.toLowerCase() === "retail - indian" || 
