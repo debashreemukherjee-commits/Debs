@@ -59,10 +59,15 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
+    // Debug: Check if API key exists (but don't log the full key)
     const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
     if (!openaiApiKey) {
-      throw new Error("OPENAI_API_KEY is not configured");
+      console.error("OPENAI_API_KEY environment variable is not set");
+      throw new Error("OPENAI_API_KEY is not configured. Please set it in your Supabase Edge Function secrets.");
     }
+    
+    // Log key length and first few chars to verify it's loaded (safe for debugging)
+    console.log(`OpenAI API Key loaded: length=${openaiApiKey.length}, starts with=${openaiApiKey.substring(0, 7)}...`);
 
     const { sessionId, auditPrompt, rawData, thresholdData }: AuditRequest = await req.json();
 
@@ -94,7 +99,7 @@ Deno.serve(async (req: Request) => {
         const threshold = thresholdMap.get(thresholdKey);
         const thresholdAvailable = !!threshold;
         const segment = record.bl_segment;
-const markedAsRetail = segment?.toLowerCase() === "retail - indian" || 
+        const markedAsRetail = segment?.toLowerCase() === "retail - indian" || 
                        segment?.toLowerCase() === "retail - foreign";
 
         let mcatType = "Standard MCAT";
@@ -178,6 +183,8 @@ Record Details:
 DO NOT reference the sheet threshold. Provide your independent commercial assessment.`;
 
         try {
+          console.log(`Calling OpenAI API for record ${record.eto_ofr_display_id}`);
+          
           const response = await fetch("https://api.openai.com/v1/chat/completions", {
             method: "POST",
             headers: {
@@ -196,28 +203,37 @@ DO NOT reference the sheet threshold. Provide your independent commercial assess
             }),
           });
 
-         // Replace it with this enhanced error logging:
-if (!response.ok) {
-  const errorText = await response.text();
-  console.error("OpenAI API Error Status:", response.status);
-  console.error("OpenAI API Error Details:", errorText);
-  
-  // Try to parse the error for more details
-  try {
-    const errorJson = JSON.parse(errorText);
-    console.error("OpenAI Error Code:", errorJson.error?.code);
-    console.error("OpenAI Error Message:", errorJson.error?.message);
-    console.error("OpenAI Error Type:", errorJson.error?.type);
-    console.error("OpenAI Error Param:", errorJson.error?.param);
-  } catch (e) {
-    // If it's not JSON, just log the raw text
-    console.error("Raw error response (not JSON):", errorText);
-  }
-  
-  throw new Error(`OpenAI API error: ${response.status} - ${errorText.substring(0, 200)}`);
-}
+          // Enhanced error handling for OpenAI API
+          if (!response.ok) {
+            const errorText = await response.text();
+            console.error(`OpenAI API Error for record ${record.eto_ofr_display_id}:`);
+            console.error("Status:", response.status);
+            console.error("Status Text:", response.statusText);
+            console.error("Response Body:", errorText);
+            
+            // Try to parse the error for more details
+            try {
+              const errorJson = JSON.parse(errorText);
+              console.error("OpenAI Error Code:", errorJson.error?.code);
+              console.error("OpenAI Error Message:", errorJson.error?.message);
+              console.error("OpenAI Error Type:", errorJson.error?.type);
+              
+              // Special handling for 401 errors
+              if (response.status === 401) {
+                throw new Error(`OpenAI API authentication failed. Please check if your OPENAI_API_KEY is valid. Details: ${errorJson.error?.message || 'Invalid API key'}`);
+              }
+            } catch (parseError) {
+              // If it's not JSON, just log the raw text
+              console.error("Raw error response:", errorText);
+            }
+            
+            throw new Error(`OpenAI API error: ${response.status} - ${errorText.substring(0, 200)}`);
+          }
+
           const data = await response.json();
           const content = data.choices[0].message.content;
+          console.log(`OpenAI API success for record ${record.eto_ofr_display_id}:`, content.substring(0, 100) + "...");
+          
           const llmResponse = JSON.parse(content);
 
           return {
