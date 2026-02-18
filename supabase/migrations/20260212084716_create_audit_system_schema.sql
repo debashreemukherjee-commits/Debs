@@ -116,11 +116,8 @@ CREATE TABLE IF NOT EXISTS threshold_data (
   created_at timestamptz DEFAULT now()
 );
 
--- Drop and recreate audit_results with all columns
--- WARNING: This will delete all existing data in the table
-DROP TABLE IF EXISTS audit_results CASCADE;
-
-CREATE TABLE audit_results (
+-- Create audit_results table
+CREATE TABLE IF NOT EXISTS audit_results (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   session_id uuid NOT NULL REFERENCES audit_sessions(id) ON DELETE CASCADE,
   raw_data_id uuid NOT NULL REFERENCES raw_audit_data(id) ON DELETE CASCADE,
@@ -130,22 +127,15 @@ CREATE TABLE audit_results (
   quantity numeric,
   quantity_unit text,
   bl_segment text,
-  business_mcat_key integer,
-  mcat_type text,
   indiamart_audit_outcome text,
   threshold_available boolean,
-  threshold_value text,
   indiamart_category text,
   indiamart_reason text,
   llm_bl_type text,
-  llm_threshold_value text,  -- Changed to TEXT to accommodate unit strings
+  llm_threshold_value numeric,
   llm_threshold_reason text,
-  evaluation_rationale text,
   created_at timestamptz DEFAULT now()
 );
-
--- Recreate the index
-CREATE INDEX IF NOT EXISTS idx_audit_results_session ON audit_results(session_id);
 
 -- Create indexes for better query performance
 CREATE INDEX IF NOT EXISTS idx_raw_audit_data_session ON raw_audit_data(session_id);

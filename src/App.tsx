@@ -112,34 +112,23 @@ function App() {
 
       const edgeFunctionUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/audit-with-chatgpt`;
 
-      let auditResponse;
-      try {
-        auditResponse = await fetch(edgeFunctionUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
-          },
-          body: JSON.stringify({
-            sessionId: session.id,
-            auditPrompt: auditPrompt,
-            rawData: insertedRawData,
-            thresholdData: thresholdInserts,
-          }),
-        });
-      } catch (fetchError: any) {
-        throw new Error(`Failed to reach edge function: ${fetchError.message || 'Network error'}`);
-      }
+      const auditResponse = await fetch(edgeFunctionUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+        },
+        body: JSON.stringify({
+          sessionId: session.id,
+          auditPrompt: auditPrompt,
+          rawData: insertedRawData,
+          thresholdData: thresholdInserts,
+        }),
+      });
 
       if (!auditResponse.ok) {
-        let errorData: any = {};
-        try {
-          errorData = await auditResponse.json();
-        } catch {
-          const text = await auditResponse.text();
-          throw new Error(`Edge function error (${auditResponse.status}): ${text || 'Unknown error'}`);
-        }
-        throw new Error(errorData.error || errorData.message || `Failed to process audit (${auditResponse.status})`);
+        const errorData = await auditResponse.json();
+        throw new Error(errorData.error || 'Failed to process audit with AI');
       }
 
       const { results: auditResultsData } = await auditResponse.json();

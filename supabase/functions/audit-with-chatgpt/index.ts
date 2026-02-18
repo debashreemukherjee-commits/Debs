@@ -48,7 +48,6 @@ interface AuditResult {
   llm_bl_type: string;
   llm_threshold_value: string;
   llm_threshold_reason: string;
-  evaluation_rationale: string;
 }
 
 Deno.serve(async (req: Request) => {
@@ -60,20 +59,17 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    // LLM Gateway configuration - following the template exactly
+    // Lite LLM Gateway configuration
     const llmApiKey = Deno.env.get("LLM_GATEWAY_KEY");
     if (!llmApiKey) {
       console.error("LLM_GATEWAY_KEY environment variable is not set");
-      console.error("Please set it in your Supabase Edge Function secrets or local .env file");
-      throw new Error("LLM_GATEWAY_KEY environment variable is not set. Please configure it in your Supabase Edge Function secrets.");
+      throw new Error("LLM_GATEWAY_KEY is not configured. Please set it in your Supabase Edge Function secrets.");
     }
-
-    // Following the template: openai.api_key = "sk-xxx"
-    // and openai.base_url = "https://imllm.intermesh.net/v1"
+    
     const llmBaseUrl = "https://imllm.intermesh.net/v1";
     const llmModel = "qwen/qwen3-32b";
-
-    console.log(`LLM Gateway configured successfully with base URL: ${llmBaseUrl}`);
+    
+    console.log(`LLM Gateway configured: URL=${llmBaseUrl}, Model=${llmModel}`);
 
     const { sessionId, auditPrompt, rawData, thresholdData }: AuditRequest = await req.json();
 
@@ -218,12 +214,9 @@ Deno.serve(async (req: Request) => {
         let indiamartCategory = "";
         let indiamartReason = "";
         let thresholdValue = "NA";
-        let cutoff = 0;
-        let convertedQuantity = 0;
 
         if (thresholdAvailable && threshold) {
           thresholdValue = `${threshold.leap_retail_qty_cutoff} ${threshold.gl_unit_name}`;
-          cutoff = threshold.leap_retail_qty_cutoff;
         }
 
         if (businessMcatKey === 1) {
@@ -245,58 +238,48 @@ Deno.serve(async (req: Request) => {
           thresholdValue = "NA";
         } else {
           const quantity = record.quantity;
-          convertedQuantity = convertUnit(quantity, record.quantity_unit, threshold.gl_unit_name);
+          const convertedQuantity = convertUnit(quantity, record.quantity_unit, threshold.gl_unit_name);
+          const cutoff = threshold.leap_retail_qty_cutoff;
           const shouldBeRetail = convertedQuantity <= cutoff;
 
           if (shouldBeRetail && markedAsRetail) {
             indiamartCategory = "Retail Correctly Marked";
             indiamartOutcome = "PASS";
-            indiamartReason = `Threshold-based evaluation: Quantity ${quantity} ${record.quantity_unit} (${convertedQuantity.toFixed(2)} ${threshold.gl_unit_name}) <= threshold ${cutoff} ${threshold.gl_unit_name}`;
+            indiamartReason = "";
           } else if (!shouldBeRetail && !markedAsRetail) {
             indiamartCategory = "Non-Retail Correctly Marked";
             indiamartOutcome = "PASS";
-            indiamartReason = `Threshold-based evaluation: Quantity ${quantity} ${record.quantity_unit} (${convertedQuantity.toFixed(2)} ${threshold.gl_unit_name}) > threshold ${cutoff} ${threshold.gl_unit_name}`;
+            indiamartReason = "";
           } else if (shouldBeRetail && !markedAsRetail) {
             indiamartCategory = "Non-Retail Wrongly Marked";
             indiamartOutcome = "ERROR";
-            indiamartReason = `THRESHOLD VIOLATION: Quantity ${quantity} ${record.quantity_unit} (${convertedQuantity.toFixed(2)} ${threshold.gl_unit_name}) is within threshold ${cutoff} ${threshold.gl_unit_name} but system marked as Non-Retail`;
+            indiamartReason = `Quantity ${quantity} ${record.quantity_unit} is within threshold ${cutoff} ${threshold.gl_unit_name} but system marked as Non-Retail`;
           } else {
             indiamartCategory = "Retail Wrongly Marked";
             indiamartOutcome = "ERROR";
-            indiamartReason = `THRESHOLD VIOLATION: Quantity ${quantity} ${record.quantity_unit} (${convertedQuantity.toFixed(2)} ${threshold.gl_unit_name}) exceeds threshold ${cutoff} ${threshold.gl_unit_name} but system marked as Retail`;
+            indiamartReason = `Quantity ${quantity} ${record.quantity_unit} exceeds threshold ${cutoff} ${threshold.gl_unit_name} but system marked as Retail`;
           }
         }
 
         const systemPrompt = `${auditPrompt}
 
-You are providing a commercial assessment to SUPPORT the audit process. Your analysis is advisory and must NOT override threshold-based evaluation.
+You are evaluating using LLM Logic ONLY. This is independent of system classification and sheet thresholds.
 
-CRITICAL CONFLICT RESOLUTION RULE:
-1. MCAT threshold is PRIMARY and BINDING
-2. Buyer intent is SUPPORTING signal only
-3. If intent conflicts with threshold → ALWAYS follow the threshold
-4. Business/office use alone does NOT imply Non-Retail unless threshold is breached
-
-Evaluation Priority (for your reasoning):
-1. Buyer Required Quantity vs MCAT Threshold (if available) - BINDING
-2. Probable Order Value (POV) - Supporting signal
-3. Buyer Intent / Usage Purpose - Supporting signal (Lowest Priority)
-4. Product Type & Supporting Communication - Context only
+Rules for LLM Logic:
+- Ignore system classification completely
+- Do NOT use MCAT thresholds from the provided sheet
+- Base your evaluation purely on human commercial logic and typical buying behavior
+- Consider market norms and practical usage patterns
+- This is an opinionated, advisory assessment
 
 Respond ONLY with a valid JSON object in this exact format:
 {
   "bl_type": "Retail" or "Non-Retail",
   "threshold_value": "suggested threshold with unit as string",
-  "reasoning": "1-2 sentences explaining typical consumer vs commercial buying behaviour for this product category",
-  "evaluation_signals": {
-    "pov_signal": "Assessment of probable order value implications",
-    "buyer_intent_signal": "Extracted use case and implications",
-    "product_type_assessment": "Category-specific retail vs non-retail indicators"
-  },
-  "conflict_notes": "Any conflicts between signals and how they should be resolved per the binding threshold rule"
+  "reasoning": "1-2 sentences explaining typical consumer vs commercial buying behaviour for this product category"
 }`;
 
-        const userPrompt = `Evaluate this Buyer Lead using commercial logic. Remember: Threshold-based quantity evaluation is PRIMARY and BINDING.
+        const userPrompt = `Evaluate this Buyer Lead using independent LLM commercial logic:
 
 Record Details:
 - Buylead ID: ${record.eto_ofr_display_id}
@@ -304,24 +287,18 @@ Record Details:
 - Quantity Requested: ${record.quantity} ${record.quantity_unit}
 - Probable Order Value: ${record.probable_order_value}
 - Buyer Details: ${record.bl_details}
-- Current System Classification: ${markedAsRetail ? "Retail" : "Non-Retail"}
-- Threshold Available: ${thresholdAvailable}
-${thresholdAvailable ? `- MCAT Threshold: ${cutoff} ${threshold?.gl_unit_name}` : ""}
 
-Provide your independent commercial assessment. Note: Your assessment is ADVISORY. If it conflicts with the threshold-based evaluation, the threshold-based evaluation takes precedence.`;
+DO NOT reference the sheet threshold. Provide your independent commercial assessment.`;
 
         try {
-          console.log(`Calling LLM Gateway for record ${record.eto_ofr_display_id}`);
-          console.log(`Using API Key: ${llmApiKey.substring(0, 5)}...`); // Log partial key for debugging
-
-          // Following the template exactly:
-          // openai.api_key = "sk-xxx"
-          // openai.base_url = "https://imllm.intermesh.net/v1"
+          console.log(`Calling Lite LLM Gateway for record ${record.eto_ofr_display_id}`);
+          
+          // Using the Lite LLM template format
           const response = await fetch(`${llmBaseUrl}/chat/completions`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "Authorization": `Bearer ${llmApiKey}`, // This matches "sk-xxx" format
+              "Authorization": `Bearer ${llmApiKey}`,
             },
             body: JSON.stringify({
               model: llmModel,
@@ -335,94 +312,38 @@ Provide your independent commercial assessment. Note: Your assessment is ADVISOR
             }),
           });
 
+          // Enhanced error handling for LLM Gateway
           if (!response.ok) {
             const errorText = await response.text();
             console.error(`LLM Gateway Error for record ${record.eto_ofr_display_id}:`);
             console.error("Status:", response.status);
             console.error("Status Text:", response.statusText);
             console.error("Response Body:", errorText);
-
-            // Handle specific error cases
-            if (response.status === 401) {
-              throw new Error(`Authentication failed: Invalid LLM_GATEWAY_KEY. Please check your API key format (should start with 'sk-')`);
-            } else if (response.status === 404) {
-              throw new Error(`LLM Gateway endpoint not found. Please verify the base URL: ${llmBaseUrl}`);
-            } else if (response.status === 429) {
-              throw new Error(`Rate limit exceeded for LLM Gateway`);
+            
+            // Try to parse the error for more details
+            try {
+              const errorJson = JSON.parse(errorText);
+              console.error("LLM Gateway Error Code:", errorJson.error?.code);
+              console.error("LLM Gateway Error Message:", errorJson.error?.message);
+              console.error("LLM Gateway Error Type:", errorJson.error?.type);
+              
+              // Special handling for 401 errors
+              if (response.status === 401) {
+                throw new Error(`LLM Gateway authentication failed. Please check your LLM_GATEWAY_KEY. Details: ${errorJson.error?.message || 'Invalid API key'}`);
+              }
+            } catch (parseError) {
+              // If it's not JSON, just log the raw text
+              console.error("Raw error response:", errorText);
             }
-
+            
             throw new Error(`LLM Gateway error: ${response.status} - ${errorText.substring(0, 200)}`);
           }
 
           const data = await response.json();
-          
-          // Validate response structure
-          if (!data.choices || !data.choices[0] || !data.choices[0].message) {
-            console.error("Unexpected LLM Gateway response structure:", data);
-            throw new Error("Invalid response structure from LLM Gateway");
-          }
-
           const content = data.choices[0].message.content;
-          console.log(`LLM Gateway success for record ${record.eto_ofr_display_id}`);
-
-          let llmResponse;
-          try {
-            llmResponse = JSON.parse(content);
-          } catch (parseError) {
-            console.error("Failed to parse LLM response as JSON:", content);
-            throw new Error("LLM response was not valid JSON");
-          }
-
-          const buildEvaluationRationale = (): string => {
-            const parts: string[] = [];
-
-            parts.push(`EVALUATION SUMMARY FOR ${record.eto_ofr_display_id}:`);
-            parts.push("");
-
-            if (businessMcatKey === 1) {
-              parts.push("PRIMARY SIGNAL: Business MCAT Key = 1");
-              parts.push(`Status: ${indiamartOutcome === "PASS" ? "COMPLIANT" : "VIOLATION"}`);
-              parts.push(`Reason: ${indiamartReason}`);
-            } else if (!thresholdAvailable) {
-              parts.push("PRIMARY SIGNAL: Threshold Not Available");
-              parts.push(`Status: ${indiamartOutcome}`);
-              parts.push(`Reason: ${indiamartReason}`);
-            } else {
-              parts.push("EVALUATION PRIORITY HIERARCHY:");
-              parts.push(`1. BINDING THRESHOLD SIGNAL: ${indiamartCategory}`);
-              parts.push(`   - Quantity: ${record.quantity} ${record.quantity_unit} (converted: ${convertedQuantity.toFixed(2)} ${threshold?.gl_unit_name})`);
-              parts.push(`   - Threshold: ${cutoff} ${threshold?.gl_unit_name}`);
-              parts.push(`   - Status: ${indiamartOutcome === "PASS" ? "COMPLIANT" : "VIOLATION"}`);
-              parts.push("");
-
-              parts.push("2. SUPPORTING SIGNALS (Advisory Only):");
-              if (llmResponse.evaluation_signals) {
-                const signals = llmResponse.evaluation_signals;
-                if (signals.pov_signal) {
-                  parts.push(`   - POV Assessment: ${signals.pov_signal}`);
-                }
-                if (signals.buyer_intent_signal) {
-                  parts.push(`   - Buyer Intent: ${signals.buyer_intent_signal}`);
-                }
-                if (signals.product_type_assessment) {
-                  parts.push(`   - Product Type: ${signals.product_type_assessment}`);
-                }
-              }
-
-              parts.push("");
-              parts.push("CONFLICT RESOLUTION:");
-              if (llmResponse.conflict_notes) {
-                parts.push(`LLM Assessment Notes: ${llmResponse.conflict_notes}`);
-              }
-              parts.push(`Threshold-based verdict takes PRECEDENCE. Final outcome: ${indiamartOutcome === "PASS" ? "COMPLIANT" : "VIOLATION"}`);
-            }
-
-            parts.push("");
-            parts.push(`LLM INDEPENDENT ASSESSMENT: ${llmResponse.bl_type || "N/A"}`);
-            parts.push(`LLM Suggested Threshold: ${llmResponse.threshold_value || "N/A"}`);
-
-            return parts.join("\n");
-          };
+          console.log(`LLM Gateway success for record ${record.eto_ofr_display_id}:`, content.substring(0, 100) + "...");
+          
+          const llmResponse = JSON.parse(content);
 
           return {
             session_id: sessionId,
@@ -443,7 +364,6 @@ Provide your independent commercial assessment. Note: Your assessment is ADVISOR
             llm_bl_type: llmResponse.bl_type || "Unknown",
             llm_threshold_value: llmResponse.threshold_value || "Not specified",
             llm_threshold_reason: llmResponse.reasoning || "No reasoning provided",
-            evaluation_rationale: buildEvaluationRationale(),
           };
         } catch (error) {
           console.error(`Error processing record ${record.eto_ofr_display_id}:`, error);
@@ -467,7 +387,6 @@ Provide your independent commercial assessment. Note: Your assessment is ADVISOR
             llm_bl_type: "Error",
             llm_threshold_value: "Error",
             llm_threshold_reason: `Error processing with AI: ${error.message}`,
-            evaluation_rationale: `Error during LLM evaluation: ${error.message}`,
           };
         }
       });
@@ -477,14 +396,7 @@ Provide your independent commercial assessment. Note: Your assessment is ADVISOR
     }
 
     return new Response(
-      JSON.stringify({ 
-        success: true, 
-        results: auditResults,
-        metadata: {
-          total_records: auditResults.length,
-          llm_gateway_configured: true
-        }
-      }),
+      JSON.stringify({ success: true, results: auditResults }),
       {
         headers: {
           ...corsHeaders,
@@ -494,12 +406,10 @@ Provide your independent commercial assessment. Note: Your assessment is ADVISOR
     );
   } catch (error) {
     console.error("Edge function error:", error);
-    const errorMessage = error instanceof Error ? error.message : String(error);
     return new Response(
       JSON.stringify({
         success: false,
-        error: errorMessage || "An error occurred during audit processing",
-        solution: "Please ensure LLM_GATEWAY_KEY is set in your Supabase Edge Function secrets. It should be in the format 'sk-xxx'"
+        error: error.message || "An error occurred during audit processing"
       }),
       {
         status: 500,
