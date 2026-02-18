@@ -59,9 +59,9 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const geminiApiKey = Deno.env.get("GEMINI_API_KEY");
-    if (!geminiApiKey) {
-      throw new Error("GEMINI_API_KEY is not configured");
+    const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
+    if (!openaiApiKey) {
+      throw new Error("OPENAI_API_KEY is not configured");
     }
 
     const { sessionId, auditPrompt, rawData, thresholdData }: AuditRequest = await req.json();
@@ -169,44 +169,46 @@ Record Details:
 DO NOT reference the sheet threshold. Provide your independent commercial assessment.`;
 
         try {
-          const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiApiKey}`, {
+          const response = await fetch("https://api.openai.com/v1/chat/completions", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
+              "Authorization": `Bearer ${openaiApiKey}`,
             },
             body: JSON.stringify({
-              contents: [{
-                parts: [{
-                  text: `${systemPrompt}\n\n${userPrompt}`
-                }]
-              }],
-              generationConfig: {
-                temperature: 0,
-                maxOutputTokens: 600,
-                responseMimeType: "application/json",
-              },
+              model: "gpt-5.2",
+              messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: userPrompt },
+              ],
+              temperature: 0,
+              max_tokens: 600,
+              response_format: { type: "json_object" },
             }),
           });
 
-          if (!response.ok) {
-            const errorText = await response.text();
-            console.error("Gemini API Error Status:", response.status);
-            console.error("Gemini API Error Details:", errorText);
-
-            try {
-              const errorJson = JSON.parse(errorText);
-              console.error("Gemini Error Code:", errorJson.error?.code);
-              console.error("Gemini Error Message:", errorJson.error?.message);
-              console.error("Gemini Error Status:", errorJson.error?.status);
-            } catch (e) {
-              console.error("Raw error response (not JSON):", errorText);
-            }
-
-            throw new Error(`Gemini API error: ${response.status} - ${errorText.substring(0, 200)}`);
-          }
-
+         // Replace it with this enhanced error logging:
+if (!response.ok) {
+  const errorText = await response.text();
+  console.error("OpenAI API Error Status:", response.status);
+  console.error("OpenAI API Error Details:", errorText);
+  
+  // Try to parse the error for more details
+  try {
+    const errorJson = JSON.parse(errorText);
+    console.error("OpenAI Error Code:", errorJson.error?.code);
+    console.error("OpenAI Error Message:", errorJson.error?.message);
+    console.error("OpenAI Error Type:", errorJson.error?.type);
+    console.error("OpenAI Error Param:", errorJson.error?.param);
+  } catch (e) {
+    // If it's not JSON, just log the raw text
+    console.error("Raw error response (not JSON):", errorText);
+  }
+  
+  throw new Error(`OpenAI API error: ${response.status} - ${errorText.substring(0, 200)}`);
+}
           const data = await response.json();
-          const content = data.candidates[0].content.parts[0].text;
+          const content = data.choices[0].message.content;
           const llmResponse = JSON.parse(content);
 
           return {
