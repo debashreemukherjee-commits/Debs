@@ -59,9 +59,9 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
-    if (!openaiApiKey) {
-      throw new Error("OPENAI_API_KEY is not configured");
+    const llmGatewayKey = Deno.env.get("LLM_GATEWAY_KEY");
+    if (!llmGatewayKey) {
+      throw new Error("LLM_GATEWAY_KEY is not configured");
     }
 
     const { sessionId, auditPrompt, rawData, thresholdData }: AuditRequest = await req.json();
@@ -94,8 +94,8 @@ Deno.serve(async (req: Request) => {
         const threshold = thresholdMap.get(thresholdKey);
         const thresholdAvailable = !!threshold;
         const segment = record.bl_segment;
-const markedAsRetail = segment?.toLowerCase() === "retail - indian" || 
-                       segment?.toLowerCase() === "retail - foreign";
+        const markedAsRetail = segment?.toLowerCase() === "retail - indian" || 
+                               segment?.toLowerCase() === "retail - foreign";
 
         let mcatType = "Standard MCAT";
         let indiamartOutcome = "PASS";
@@ -178,47 +178,57 @@ Record Details:
 DO NOT reference the sheet threshold. Provide your independent commercial assessment.`;
 
         try {
-          const response = await fetch("https://api.openai.com/v1/chat/completions", {
+          // Modified to use the provided LLM template format
+          const response = await fetch("https://imllm.intermesh.net/v1/chat/completions", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "Authorization": `Bearer ${openaiApiKey}`,
+              "Authorization": `Bearer ${llmGatewayKey}`,
             },
             body: JSON.stringify({
-              model: "gpt-4o-mini",
+              model: "qwen/qwen3-32b",
               messages: [
                 { role: "system", content: systemPrompt },
                 { role: "user", content: userPrompt },
               ],
               temperature: 0,
               max_tokens: 600,
-              response_format: { type: "json_object" },
+              // Note: response_format might not be supported by all models, remove if causing issues
+              // response_format: { type: "json_object" },
             }),
           });
 
-         // Replace it with this enhanced error logging:
-if (!response.ok) {
-  const errorText = await response.text();
-  console.error("OpenAI API Error Status:", response.status);
-  console.error("OpenAI API Error Details:", errorText);
-  
-  // Try to parse the error for more details
-  try {
-    const errorJson = JSON.parse(errorText);
-    console.error("OpenAI Error Code:", errorJson.error?.code);
-    console.error("OpenAI Error Message:", errorJson.error?.message);
-    console.error("OpenAI Error Type:", errorJson.error?.type);
-    console.error("OpenAI Error Param:", errorJson.error?.param);
-  } catch (e) {
-    // If it's not JSON, just log the raw text
-    console.error("Raw error response (not JSON):", errorText);
-  }
-  
-  throw new Error(`OpenAI API error: ${response.status} - ${errorText.substring(0, 200)}`);
-}
+          if (!response.ok) {
+            const errorText = await response.text();
+            console.error("LLM API Error Status:", response.status);
+            console.error("LLM API Error Details:", errorText);
+            
+            // Try to parse the error for more details
+            try {
+              const errorJson = JSON.parse(errorText);
+              console.error("LLM Error Details:", errorJson);
+            } catch (e) {
+              // If it's not JSON, just log the raw text
+              console.error("Raw error response (not JSON):", errorText);
+            }
+            
+            throw new Error(`LLM API error: ${response.status} - ${errorText.substring(0, 200)}`);
+          }
+          
           const data = await response.json();
           const content = data.choices[0].message.content;
-          const llmResponse = JSON.parse(content);
+          
+          // Parse the JSON response, handling potential markdown code blocks
+          let llmResponse;
+          try {
+            // Check if response is wrapped in markdown code blocks
+            const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || [null, content];
+            const jsonString = jsonMatch[1] || content;
+            llmResponse = JSON.parse(jsonString.trim());
+          } catch (parseError) {
+            console.error("Failed to parse LLM response as JSON:", content);
+            throw new Error("Invalid JSON response from LLM");
+          }
 
           return {
             session_id: sessionId,
