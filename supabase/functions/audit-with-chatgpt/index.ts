@@ -80,17 +80,17 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    // Lite LLM Gateway configuration
-    const llmApiKey = Deno.env.get("LLM_GATEWAY_KEY");
-    if (!llmApiKey) {
-      console.error("LLM_GATEWAY_KEY environment variable is not set");
-      throw new Error("LLM_GATEWAY_KEY is not configured. Please set it in your Supabase Edge Function secrets.");
+    // OpenAI API configuration
+    const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
+    if (!openaiApiKey) {
+      console.error("OPENAI_API_KEY environment variable is not set");
+      throw new Error("OPENAI_API_KEY is not configured. Please set it in your Supabase Edge Function secrets.");
     }
-    
-    const llmBaseUrl = "https://imllm.intermesh.net/v1";
-    const llmModel = "qwen/qwen3-32b";
-    
-    console.log(`LLM Gateway configured: URL=${llmBaseUrl}, Model=${llmModel}`);
+
+    const openaiBaseUrl = "https://api.openai.com/v1";
+    const openaiModel = "gpt-4o-mini";
+
+    console.log(`OpenAI configured: URL=${openaiBaseUrl}, Model=${openaiModel}`);
 
     const { sessionId, auditPrompt, rawData, thresholdData }: AuditRequest = await req.json();
 
@@ -330,17 +330,16 @@ ${thresholdAvailable ? `- MCAT Threshold: ${cutoff} ${threshold?.gl_unit_name}` 
 Provide your independent commercial assessment. Note: Your assessment is ADVISORY. If it conflicts with the threshold-based evaluation, the threshold-based evaluation takes precedence.`;
 
         try {
-          console.log(`Calling Lite LLM Gateway for record ${record.eto_ofr_display_id}`);
-          
-          // Using the Lite LLM template format
-          const response = await fetch(`${llmBaseUrl}/chat/completions`, {
+          console.log(`Calling OpenAI API for record ${record.eto_ofr_display_id}`);
+
+          const response = await fetch(`${openaiBaseUrl}/chat/completions`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "Authorization": `Bearer ${llmApiKey}`,
+              "Authorization": `Bearer ${openaiApiKey}`,
             },
             body: JSON.stringify({
-              model: llmModel,
+              model: openaiModel,
               messages: [
                 { role: "system", content: systemPrompt },
                 { role: "user", content: userPrompt },
@@ -351,36 +350,31 @@ Provide your independent commercial assessment. Note: Your assessment is ADVISOR
             }),
           });
 
-          // Enhanced error handling for LLM Gateway
           if (!response.ok) {
             const errorText = await response.text();
-            console.error(`LLM Gateway Error for record ${record.eto_ofr_display_id}:`);
+            console.error(`OpenAI API Error for record ${record.eto_ofr_display_id}:`);
             console.error("Status:", response.status);
             console.error("Status Text:", response.statusText);
             console.error("Response Body:", errorText);
-            
-            // Try to parse the error for more details
+
             try {
               const errorJson = JSON.parse(errorText);
-              console.error("LLM Gateway Error Code:", errorJson.error?.code);
-              console.error("LLM Gateway Error Message:", errorJson.error?.message);
-              console.error("LLM Gateway Error Type:", errorJson.error?.type);
-              
-              // Special handling for 401 errors
+              console.error("OpenAI Error Code:", errorJson.error?.code);
+              console.error("OpenAI Error Message:", errorJson.error?.message);
+
               if (response.status === 401) {
-                throw new Error(`LLM Gateway authentication failed. Please check your LLM_GATEWAY_KEY. Details: ${errorJson.error?.message || 'Invalid API key'}`);
+                throw new Error(`OpenAI authentication failed. Please check your OPENAI_API_KEY. Details: ${errorJson.error?.message || 'Invalid API key'}`);
               }
             } catch (parseError) {
-              // If it's not JSON, just log the raw text
               console.error("Raw error response:", errorText);
             }
-            
-            throw new Error(`LLM Gateway error: ${response.status} - ${errorText.substring(0, 200)}`);
+
+            throw new Error(`OpenAI API error: ${response.status} - ${errorText.substring(0, 200)}`);
           }
 
           const data = await response.json();
           const content = data.choices[0].message.content;
-          console.log(`LLM Gateway success for record ${record.eto_ofr_display_id}:`, content.substring(0, 100) + "...");
+          console.log(`OpenAI success for record ${record.eto_ofr_display_id}:`, content.substring(0, 100) + "...");
 
           const llmResponse = JSON.parse(content);
 
