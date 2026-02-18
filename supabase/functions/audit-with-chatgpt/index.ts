@@ -1,5 +1,4 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import OpenAI from "https://deno.land/x/openai@v4.24.0/mod.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -51,12 +50,6 @@ interface AuditResult {
   llm_threshold_reason: string;
 }
 
-// Initialize OpenAI client with LLM Gateway configuration
-const openai = new OpenAI({
-  apiKey: Deno.env.get("LLM_GATEWAY_API_KEY") || "sk-xxx",
-  baseURL: "https://imllm.intermesh.net/v1",
-});
-
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, {
@@ -66,11 +59,17 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    // Check if API key is properly configured
-    const apiKey = Deno.env.get("LLM_GATEWAY_API_KEY");
-    if (!apiKey || apiKey === "sk-xxx") {
-      throw new Error("LLM Gateway API key is not properly configured. Please set LLM_GATEWAY_API_KEY environment variable.");
+    // Lite LLM Gateway configuration
+    const llmApiKey = Deno.env.get("LLM_GATEWAY_KEY");
+    if (!llmApiKey) {
+      console.error("LLM_GATEWAY_KEY environment variable is not set");
+      throw new Error("LLM_GATEWAY_KEY is not configured. Please set it in your Supabase Edge Function secrets.");
     }
+    
+    const llmBaseUrl = "https://imllm.intermesh.net/v1";
+    const llmModel = "qwen/qwen3-32b";
+    
+    console.log(`LLM Gateway configured: URL=${llmBaseUrl}, Model=${llmModel}`);
 
     const { sessionId, auditPrompt, rawData, thresholdData }: AuditRequest = await req.json();
 
@@ -83,12 +82,118 @@ Deno.serve(async (req: Request) => {
       return unit.toLowerCase().trim();
     };
 
-    const thresholdMap = new Map(
-      thresholdData.map((t) => {
-        const key = `${t.fk_glcat_mcat_id}_${normalizeUnit(t.gl_unit_name)}`;
-        return [key, t];
-      })
-    );
+    const getUnitCategory = (unit: string): string | null => {
+      const normalized = normalizeUnit(unit);
+      const weightUnits = ["mg", "g", "kg", "tonne", "lbs", "lb", "oz", "ounce"];
+      const volumeUnits = ["ml", "l", "liter", "litre", "gallon", "pint", "cc"];
+      const lengthUnits = ["mm", "cm", "m", "km", "inch", "foot", "yard", "mile"];
+      const countUnits = ["piece", "pieces", "unit", "units", "dozen", "count"];
+
+      if (weightUnits.includes(normalized)) return "weight";
+      if (volumeUnits.includes(normalized)) return "volume";
+      if (lengthUnits.includes(normalized)) return "length";
+      if (countUnits.includes(normalized)) return "count";
+      return null;
+    };
+
+    const convertUnit = (value: number, fromUnit: string, toUnit: string): number => {
+      const from = normalizeUnit(fromUnit);
+      const to = normalizeUnit(toUnit);
+
+      if (from === to) return value;
+
+      const fromCategory = getUnitCategory(from);
+      const toCategory = getUnitCategory(to);
+
+      if (!fromCategory || !toCategory || fromCategory !== toCategory) {
+        return value;
+      }
+
+      const weightConversions: { [key: string]: number } = {
+        "mg": 0.001,
+        "g": 1,
+        "kg": 1000,
+        "tonne": 1000000,
+        "lbs": 453.592,
+        "lb": 453.592,
+        "oz": 28.3495,
+        "ounce": 28.3495,
+      };
+
+      const volumeConversions: { [key: string]: number } = {
+        "ml": 1,
+        "l": 1000,
+        "liter": 1000,
+        "litre": 1000,
+        "cc": 1,
+        "gallon": 3785.41,
+        "pint": 473.176,
+      };
+
+      const lengthConversions: { [key: string]: number } = {
+        "mm": 1,
+        "cm": 10,
+        "m": 1000,
+        "km": 1000000,
+        "inch": 25.4,
+        "foot": 304.8,
+        "yard": 914.4,
+        "mile": 1609344,
+      };
+
+      const countConversions: { [key: string]: number } = {
+        "piece": 1,
+        "pieces": 1,
+        "unit": 1,
+        "units": 1,
+        "dozen": 12,
+        "count": 1,
+      };
+
+      let conversions: { [key: string]: number } = {};
+      if (fromCategory === "weight") conversions = weightConversions;
+      else if (fromCategory === "volume") conversions = volumeConversions;
+      else if (fromCategory === "length") conversions = lengthConversions;
+      else if (fromCategory === "count") conversions = countConversions;
+
+      const fromFactor = conversions[from] || 1;
+      const toFactor = conversions[to] || 1;
+
+      return (value * fromFactor) / toFactor;
+    };
+
+    const thresholdsByMcat = new Map<string, Array<{ threshold: any; unit: string }>>();
+    thresholdData.forEach((t) => {
+      const mcatId = t.fk_glcat_mcat_id;
+      if (!thresholdsByMcat.has(mcatId)) {
+        thresholdsByMcat.set(mcatId, []);
+      }
+      thresholdsByMcat.get(mcatId)!.push({ threshold: t, unit: normalizeUnit(t.gl_unit_name) });
+    });
+
+    const findThreshold = (mcatId: string, auditUnit: string) => {
+      const thresholds = thresholdsByMcat.get(mcatId);
+      if (!thresholds || thresholds.length === 0) return null;
+
+      const normalizedAuditUnit = normalizeUnit(auditUnit);
+      const auditUnitCategory = getUnitCategory(auditUnit);
+
+      for (const { threshold, unit } of thresholds) {
+        if (unit === normalizedAuditUnit) {
+          return threshold;
+        }
+      }
+
+      if (auditUnitCategory) {
+        for (const { threshold, unit } of thresholds) {
+          if (getUnitCategory(unit) === auditUnitCategory) {
+            return threshold;
+          }
+        }
+      }
+
+      return thresholds[0].threshold;
+    };
 
     const auditResults: AuditResult[] = [];
 
@@ -98,12 +203,11 @@ Deno.serve(async (req: Request) => {
 
       const batchPromises = batch.map(async (record) => {
         const businessMcatKey = record.business_mcat_key || 0;
-        const thresholdKey = `${record.fk_glcat_mcat_id}_${normalizeUnit(record.quantity_unit)}`;
-        const threshold = thresholdMap.get(thresholdKey);
+        const threshold = findThreshold(record.fk_glcat_mcat_id, record.quantity_unit);
         const thresholdAvailable = !!threshold;
         const segment = record.bl_segment;
-        const markedAsRetail = segment?.toLowerCase() === "retail - indian" || 
-                               segment?.toLowerCase() === "retail - foreign";
+        const markedAsRetail = segment?.toLowerCase() === "retail - indian" ||
+                       segment?.toLowerCase() === "retail - foreign";
 
         let mcatType = "Standard MCAT";
         let indiamartOutcome = "PASS";
@@ -134,8 +238,9 @@ Deno.serve(async (req: Request) => {
           thresholdValue = "NA";
         } else {
           const quantity = record.quantity;
+          const convertedQuantity = convertUnit(quantity, record.quantity_unit, threshold.gl_unit_name);
           const cutoff = threshold.leap_retail_qty_cutoff;
-          const shouldBeRetail = quantity <= cutoff;
+          const shouldBeRetail = convertedQuantity <= cutoff;
 
           if (shouldBeRetail && markedAsRetail) {
             indiamartCategory = "Retail Correctly Marked";
@@ -186,23 +291,58 @@ Record Details:
 DO NOT reference the sheet threshold. Provide your independent commercial assessment.`;
 
         try {
-          // Using OpenAI SDK style as per the template
-          const response = await openai.chat.completions.create({
-            model: "gpt-4.1-mini",  // Updated to match template's model
-            messages: [
-              { role: "system", content: systemPrompt },
-              { role: "user", content: userPrompt },
-            ],
-            temperature: 0,
-            max_tokens: 600,
-            response_format: { type: "json_object" },
+          console.log(`Calling Lite LLM Gateway for record ${record.eto_ofr_display_id}`);
+          
+          // Using the Lite LLM template format
+          const response = await fetch(`${llmBaseUrl}/chat/completions`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${llmApiKey}`,
+            },
+            body: JSON.stringify({
+              model: llmModel,
+              messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: userPrompt },
+              ],
+              temperature: 0,
+              max_tokens: 600,
+              response_format: { type: "json_object" },
+            }),
           });
 
-          const content = response.choices[0]?.message?.content;
-          if (!content) {
-            throw new Error("Empty response from LLM");
+          // Enhanced error handling for LLM Gateway
+          if (!response.ok) {
+            const errorText = await response.text();
+            console.error(`LLM Gateway Error for record ${record.eto_ofr_display_id}:`);
+            console.error("Status:", response.status);
+            console.error("Status Text:", response.statusText);
+            console.error("Response Body:", errorText);
+            
+            // Try to parse the error for more details
+            try {
+              const errorJson = JSON.parse(errorText);
+              console.error("LLM Gateway Error Code:", errorJson.error?.code);
+              console.error("LLM Gateway Error Message:", errorJson.error?.message);
+              console.error("LLM Gateway Error Type:", errorJson.error?.type);
+              
+              // Special handling for 401 errors
+              if (response.status === 401) {
+                throw new Error(`LLM Gateway authentication failed. Please check your LLM_GATEWAY_KEY. Details: ${errorJson.error?.message || 'Invalid API key'}`);
+              }
+            } catch (parseError) {
+              // If it's not JSON, just log the raw text
+              console.error("Raw error response:", errorText);
+            }
+            
+            throw new Error(`LLM Gateway error: ${response.status} - ${errorText.substring(0, 200)}`);
           }
 
+          const data = await response.json();
+          const content = data.choices[0].message.content;
+          console.log(`LLM Gateway success for record ${record.eto_ofr_display_id}:`, content.substring(0, 100) + "...");
+          
           const llmResponse = JSON.parse(content);
 
           return {
