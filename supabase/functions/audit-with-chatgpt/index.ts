@@ -230,14 +230,18 @@ Deno.serve(async (req: Request) => {
         const markedAsRetail = segment?.toLowerCase() === "retail - indian" ||
                        segment?.toLowerCase() === "retail - foreign";
 
+        // Declare variables at the top of the function scope
         let mcatType = "Standard MCAT";
         let indiamartOutcome = "PASS";
         let indiamartCategory = "";
         let indiamartReason = "";
         let thresholdValue = "NA";
+        let cutoff = 0; // Initialize cutoff
+        let convertedQuantity = 0; // Initialize convertedQuantity
 
         if (thresholdAvailable && threshold) {
           thresholdValue = `${threshold.leap_retail_qty_cutoff} ${threshold.gl_unit_name}`;
+          cutoff = threshold.leap_retail_qty_cutoff; // Store cutoff value
         }
 
         if (businessMcatKey === 1) {
@@ -259,8 +263,7 @@ Deno.serve(async (req: Request) => {
           thresholdValue = "NA";
         } else {
           const quantity = record.quantity;
-          const convertedQuantity = convertUnit(quantity, record.quantity_unit, threshold.gl_unit_name);
-          const cutoff = threshold.leap_retail_qty_cutoff;
+          convertedQuantity = convertUnit(quantity, record.quantity_unit, threshold.gl_unit_name);
           const shouldBeRetail = convertedQuantity <= cutoff;
 
           if (shouldBeRetail && markedAsRetail) {
@@ -398,7 +401,7 @@ Provide your independent commercial assessment. Note: Your assessment is ADVISOR
             } else {
               parts.push("EVALUATION PRIORITY HIERARCHY:");
               parts.push(`1. BINDING THRESHOLD SIGNAL: ${indiamartCategory}`);
-              parts.push(`   - Quantity: ${quantity} ${record.quantity_unit} (converted: ${convertedQuantity.toFixed(2)} ${threshold?.gl_unit_name})`);
+              parts.push(`   - Quantity: ${record.quantity} ${record.quantity_unit} (converted: ${convertedQuantity.toFixed(2)} ${threshold?.gl_unit_name})`);
               parts.push(`   - Threshold: ${cutoff} ${threshold?.gl_unit_name}`);
               parts.push(`   - Status: ${indiamartOutcome === "PASS" ? "COMPLIANT" : "VIOLATION"}`);
               parts.push("");
