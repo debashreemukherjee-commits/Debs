@@ -1,4 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import OpenAI from "https://deno.land/x/openai@v4.24.0/mod.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -50,6 +51,12 @@ interface AuditResult {
   llm_threshold_reason: string;
 }
 
+// Initialize OpenAI client with LLM Gateway configuration
+const openai = new OpenAI({
+  apiKey: Deno.env.get("LLM_GATEWAY_API_KEY") || "sk-xxx",
+  baseURL: "https://imllm.intermesh.net/v1",
+});
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, {
@@ -59,12 +66,10 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    // Use the LLM Gateway configuration from the template
-    const llmApiKey = Deno.env.get("LLM_GATEWAY_API_KEY") || "sk-xxx"; // Fallback to sk-xxx if env var not set
-    const llmBaseUrl = "https://imllm.intermesh.net/v1";
-
-    if (!llmApiKey || llmApiKey === "sk-xxx") {
-      throw new Error("LLM Gateway API key is not properly configured");
+    // Check if API key is properly configured
+    const apiKey = Deno.env.get("LLM_GATEWAY_API_KEY");
+    if (!apiKey || apiKey === "sk-xxx") {
+      throw new Error("LLM Gateway API key is not properly configured. Please set LLM_GATEWAY_API_KEY environment variable.");
     }
 
     const { sessionId, auditPrompt, rawData, thresholdData }: AuditRequest = await req.json();
@@ -181,45 +186,23 @@ Record Details:
 DO NOT reference the sheet threshold. Provide your independent commercial assessment.`;
 
         try {
-          // Modified to use the LLM Gateway configuration
-          const response = await fetch(`${llmBaseUrl}/chat/completions`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${llmApiKey}`,
-            },
-            body: JSON.stringify({
-              model: "gpt-4o-mini",
-              messages: [
-                { role: "system", content: systemPrompt },
-                { role: "user", content: userPrompt },
-              ],
-              temperature: 0,
-              max_tokens: 600,
-              response_format: { type: "json_object" },
-            }),
+          // Using OpenAI SDK style as per the template
+          const response = await openai.chat.completions.create({
+            model: "gpt-4.1-mini",  // Updated to match template's model
+            messages: [
+              { role: "system", content: systemPrompt },
+              { role: "user", content: userPrompt },
+            ],
+            temperature: 0,
+            max_tokens: 600,
+            response_format: { type: "json_object" },
           });
 
-          if (!response.ok) {
-            const errorText = await response.text();
-            console.error("LLM Gateway API Error Status:", response.status);
-            console.error("LLM Gateway API Error Details:", errorText);
-            
-            try {
-              const errorJson = JSON.parse(errorText);
-              console.error("LLM Gateway Error Code:", errorJson.error?.code);
-              console.error("LLM Gateway Error Message:", errorJson.error?.message);
-              console.error("LLM Gateway Error Type:", errorJson.error?.type);
-              console.error("LLM Gateway Error Param:", errorJson.error?.param);
-            } catch (e) {
-              console.error("Raw error response (not JSON):", errorText);
-            }
-            
-            throw new Error(`LLM Gateway API error: ${response.status} - ${errorText.substring(0, 200)}`);
+          const content = response.choices[0]?.message?.content;
+          if (!content) {
+            throw new Error("Empty response from LLM");
           }
-          
-          const data = await response.json();
-          const content = data.choices[0].message.content;
+
           const llmResponse = JSON.parse(content);
 
           return {
