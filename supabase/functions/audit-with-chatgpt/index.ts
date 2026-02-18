@@ -494,10 +494,11 @@ Provide your independent commercial assessment. Note: Your assessment is ADVISOR
     );
   } catch (error) {
     console.error("Edge function error:", error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
     return new Response(
       JSON.stringify({
         success: false,
-        error: error.message || "An error occurred during audit processing",
+        error: errorMessage || "An error occurred during audit processing",
         solution: "Please ensure LLM_GATEWAY_KEY is set in your Supabase Edge Function secrets. It should be in the format 'sk-xxx'"
       }),
       {
