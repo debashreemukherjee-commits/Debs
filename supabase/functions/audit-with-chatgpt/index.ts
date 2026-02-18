@@ -48,6 +48,27 @@ interface AuditResult {
   llm_bl_type: string;
   llm_threshold_value: string;
   llm_threshold_reason: string;
+  evaluation_rationale: string;
+}
+
+interface EvaluationSignals {
+  thresholdSignal: {
+    available: boolean;
+    verdict: string;
+    reason: string;
+  };
+  povSignal: {
+    value: string;
+    assessment: string;
+  };
+  buyerIntentSignal: {
+    extractedUse: string;
+    assessment: string;
+  };
+  productTypeSignal: {
+    category: string;
+    details: string;
+  };
 }
 
 Deno.serve(async (req: Request) => {
@@ -59,10 +80,17 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
-    if (!openaiApiKey) {
-      throw new Error("OPENAI_API_KEY is not configured");
+    // Lite LLM Gateway configuration
+    const llmApiKey = Deno.env.get("LLM_GATEWAY_KEY");
+    if (!llmApiKey) {
+      console.error("LLM_GATEWAY_KEY environment variable is not set");
+      throw new Error("LLM_GATEWAY_KEY is not configured. Please set it in your Supabase Edge Function secrets.");
     }
+    
+    const llmBaseUrl = "https://imllm.intermesh.net/v1";
+    const llmModel = "qwen/qwen3-32b";
+    
+    console.log(`LLM Gateway configured: URL=${llmBaseUrl}, Model=${llmModel}`);
 
     const { sessionId, auditPrompt, rawData, thresholdData }: AuditRequest = await req.json();
 
@@ -70,9 +98,123 @@ Deno.serve(async (req: Request) => {
       throw new Error("Missing required fields");
     }
 
-    const thresholdMap = new Map(
-      thresholdData.map((t) => [t.fk_glcat_mcat_id, t])
-    );
+    const normalizeUnit = (unit: string): string => {
+      if (!unit) return "";
+      return unit.toLowerCase().trim();
+    };
+
+    const getUnitCategory = (unit: string): string | null => {
+      const normalized = normalizeUnit(unit);
+      const weightUnits = ["mg", "g", "kg", "tonne", "lbs", "lb", "oz", "ounce"];
+      const volumeUnits = ["ml", "l", "liter", "litre", "gallon", "pint", "cc"];
+      const lengthUnits = ["mm", "cm", "m", "km", "inch", "foot", "yard", "mile"];
+      const countUnits = ["piece", "pieces", "unit", "units", "dozen", "count"];
+
+      if (weightUnits.includes(normalized)) return "weight";
+      if (volumeUnits.includes(normalized)) return "volume";
+      if (lengthUnits.includes(normalized)) return "length";
+      if (countUnits.includes(normalized)) return "count";
+      return null;
+    };
+
+    const convertUnit = (value: number, fromUnit: string, toUnit: string): number => {
+      const from = normalizeUnit(fromUnit);
+      const to = normalizeUnit(toUnit);
+
+      if (from === to) return value;
+
+      const fromCategory = getUnitCategory(from);
+      const toCategory = getUnitCategory(to);
+
+      if (!fromCategory || !toCategory || fromCategory !== toCategory) {
+        return value;
+      }
+
+      const weightConversions: { [key: string]: number } = {
+        "mg": 0.001,
+        "g": 1,
+        "kg": 1000,
+        "tonne": 1000000,
+        "lbs": 453.592,
+        "lb": 453.592,
+        "oz": 28.3495,
+        "ounce": 28.3495,
+      };
+
+      const volumeConversions: { [key: string]: number } = {
+        "ml": 1,
+        "l": 1000,
+        "liter": 1000,
+        "litre": 1000,
+        "cc": 1,
+        "gallon": 3785.41,
+        "pint": 473.176,
+      };
+
+      const lengthConversions: { [key: string]: number } = {
+        "mm": 1,
+        "cm": 10,
+        "m": 1000,
+        "km": 1000000,
+        "inch": 25.4,
+        "foot": 304.8,
+        "yard": 914.4,
+        "mile": 1609344,
+      };
+
+      const countConversions: { [key: string]: number } = {
+        "piece": 1,
+        "pieces": 1,
+        "unit": 1,
+        "units": 1,
+        "dozen": 12,
+        "count": 1,
+      };
+
+      let conversions: { [key: string]: number } = {};
+      if (fromCategory === "weight") conversions = weightConversions;
+      else if (fromCategory === "volume") conversions = volumeConversions;
+      else if (fromCategory === "length") conversions = lengthConversions;
+      else if (fromCategory === "count") conversions = countConversions;
+
+      const fromFactor = conversions[from] || 1;
+      const toFactor = conversions[to] || 1;
+
+      return (value * fromFactor) / toFactor;
+    };
+
+    const thresholdsByMcat = new Map<string, Array<{ threshold: any; unit: string }>>();
+    thresholdData.forEach((t) => {
+      const mcatId = t.fk_glcat_mcat_id;
+      if (!thresholdsByMcat.has(mcatId)) {
+        thresholdsByMcat.set(mcatId, []);
+      }
+      thresholdsByMcat.get(mcatId)!.push({ threshold: t, unit: normalizeUnit(t.gl_unit_name) });
+    });
+
+    const findThreshold = (mcatId: string, auditUnit: string) => {
+      const thresholds = thresholdsByMcat.get(mcatId);
+      if (!thresholds || thresholds.length === 0) return null;
+
+      const normalizedAuditUnit = normalizeUnit(auditUnit);
+      const auditUnitCategory = getUnitCategory(auditUnit);
+
+      for (const { threshold, unit } of thresholds) {
+        if (unit === normalizedAuditUnit) {
+          return threshold;
+        }
+      }
+
+      if (auditUnitCategory) {
+        for (const { threshold, unit } of thresholds) {
+          if (getUnitCategory(unit) === auditUnitCategory) {
+            return threshold;
+          }
+        }
+      }
+
+      return thresholds[0].threshold;
+    };
 
     const auditResults: AuditResult[] = [];
 
@@ -82,20 +224,24 @@ Deno.serve(async (req: Request) => {
 
       const batchPromises = batch.map(async (record) => {
         const businessMcatKey = record.business_mcat_key || 0;
-        const threshold = thresholdMap.get(record.fk_glcat_mcat_id);
+        const threshold = findThreshold(record.fk_glcat_mcat_id, record.quantity_unit);
         const thresholdAvailable = !!threshold;
         const segment = record.bl_segment;
-const markedAsRetail = segment?.toLowerCase() === "retail - indian" || 
+        const markedAsRetail = segment?.toLowerCase() === "retail - indian" ||
                        segment?.toLowerCase() === "retail - foreign";
 
+        // Declare variables at the top of the function scope
         let mcatType = "Standard MCAT";
         let indiamartOutcome = "PASS";
         let indiamartCategory = "";
         let indiamartReason = "";
         let thresholdValue = "NA";
+        let cutoff = 0; // Initialize cutoff
+        let convertedQuantity = 0; // Initialize convertedQuantity
 
         if (thresholdAvailable && threshold) {
           thresholdValue = `${threshold.leap_retail_qty_cutoff} ${threshold.gl_unit_name}`;
+          cutoff = threshold.leap_retail_qty_cutoff; // Store cutoff value
         }
 
         if (businessMcatKey === 1) {
@@ -117,47 +263,59 @@ const markedAsRetail = segment?.toLowerCase() === "retail - indian" ||
           thresholdValue = "NA";
         } else {
           const quantity = record.quantity;
-          const cutoff = threshold.leap_retail_qty_cutoff;
-          const shouldBeRetail = quantity <= cutoff;
+          convertedQuantity = convertUnit(quantity, record.quantity_unit, threshold.gl_unit_name);
+          const shouldBeRetail = convertedQuantity <= cutoff;
 
           if (shouldBeRetail && markedAsRetail) {
             indiamartCategory = "Retail Correctly Marked";
             indiamartOutcome = "PASS";
-            indiamartReason = "";
+            indiamartReason = `Threshold-based evaluation: Quantity ${quantity} ${record.quantity_unit} (${convertedQuantity.toFixed(2)} ${threshold.gl_unit_name}) <= threshold ${cutoff} ${threshold.gl_unit_name}`;
           } else if (!shouldBeRetail && !markedAsRetail) {
             indiamartCategory = "Non-Retail Correctly Marked";
             indiamartOutcome = "PASS";
-            indiamartReason = "";
+            indiamartReason = `Threshold-based evaluation: Quantity ${quantity} ${record.quantity_unit} (${convertedQuantity.toFixed(2)} ${threshold.gl_unit_name}) > threshold ${cutoff} ${threshold.gl_unit_name}`;
           } else if (shouldBeRetail && !markedAsRetail) {
             indiamartCategory = "Non-Retail Wrongly Marked";
             indiamartOutcome = "ERROR";
-            indiamartReason = `Quantity ${quantity} ${record.quantity_unit} is within threshold ${cutoff} ${threshold.gl_unit_name} but system marked as Non-Retail`;
+            indiamartReason = `THRESHOLD VIOLATION: Quantity ${quantity} ${record.quantity_unit} (${convertedQuantity.toFixed(2)} ${threshold.gl_unit_name}) is within threshold ${cutoff} ${threshold.gl_unit_name} but system marked as Non-Retail`;
           } else {
             indiamartCategory = "Retail Wrongly Marked";
             indiamartOutcome = "ERROR";
-            indiamartReason = `Quantity ${quantity} ${record.quantity_unit} exceeds threshold ${cutoff} ${threshold.gl_unit_name} but system marked as Retail`;
+            indiamartReason = `THRESHOLD VIOLATION: Quantity ${quantity} ${record.quantity_unit} (${convertedQuantity.toFixed(2)} ${threshold.gl_unit_name}) exceeds threshold ${cutoff} ${threshold.gl_unit_name} but system marked as Retail`;
           }
         }
 
         const systemPrompt = `${auditPrompt}
 
-You are evaluating using LLM Logic ONLY. This is independent of system classification and sheet thresholds.
+You are providing a commercial assessment to SUPPORT the audit process. Your analysis is advisory and must NOT override threshold-based evaluation.
 
-Rules for LLM Logic:
-- Ignore system classification completely
-- Do NOT use MCAT thresholds from the provided sheet
-- Base your evaluation purely on human commercial logic and typical buying behavior
-- Consider market norms and practical usage patterns
-- This is an opinionated, advisory assessment
+CRITICAL CONFLICT RESOLUTION RULE:
+1. MCAT threshold is PRIMARY and BINDING
+2. Buyer intent is SUPPORTING signal only
+3. If intent conflicts with threshold → ALWAYS follow the threshold
+4. Business/office use alone does NOT imply Non-Retail unless threshold is breached
+
+Evaluation Priority (for your reasoning):
+1. Buyer Required Quantity vs MCAT Threshold (if available) - BINDING
+2. Probable Order Value (POV) - Supporting signal
+3. Buyer Intent / Usage Purpose - Supporting signal (Lowest Priority)
+4. Product Type & Supporting Communication - Context only
 
 Respond ONLY with a valid JSON object in this exact format:
 {
   "bl_type": "Retail" or "Non-Retail",
   "threshold_value": "suggested threshold with unit as string",
-  "reasoning": "1-2 sentences explaining typical consumer vs commercial buying behaviour for this product category"
+  "reasoning": "1-2 sentences explaining typical consumer vs commercial buying behaviour for this product category",
+  "evaluation_signals": {
+    "threshold_signal": "Assessment of quantity vs typical thresholds",
+    "pov_signal": "Assessment of probable order value implications",
+    "buyer_intent_signal": "Extracted use case and implications",
+    "product_type_assessment": "Category-specific retail vs non-retail indicators"
+  },
+  "conflict_notes": "Any conflicts between signals and how they should be resolved per the binding threshold rule"
 }`;
 
-        const userPrompt = `Evaluate this Buyer Lead using independent LLM commercial logic:
+        const userPrompt = `Evaluate this Buyer Lead using commercial logic. Remember: Threshold-based quantity evaluation is PRIMARY and BINDING.
 
 Record Details:
 - Buylead ID: ${record.eto_ofr_display_id}
@@ -165,18 +323,24 @@ Record Details:
 - Quantity Requested: ${record.quantity} ${record.quantity_unit}
 - Probable Order Value: ${record.probable_order_value}
 - Buyer Details: ${record.bl_details}
+- Current System Classification: ${markedAsRetail ? "Retail" : "Non-Retail"}
+- Threshold Available: ${thresholdAvailable}
+${thresholdAvailable ? `- MCAT Threshold: ${cutoff} ${threshold?.gl_unit_name}` : ""}
 
-DO NOT reference the sheet threshold. Provide your independent commercial assessment.`;
+Provide your independent commercial assessment. Note: Your assessment is ADVISORY. If it conflicts with the threshold-based evaluation, the threshold-based evaluation takes precedence.`;
 
         try {
-          const response = await fetch("https://api.openai.com/v1/chat/completions", {
+          console.log(`Calling Lite LLM Gateway for record ${record.eto_ofr_display_id}`);
+          
+          // Using the Lite LLM template format
+          const response = await fetch(`${llmBaseUrl}/chat/completions`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "Authorization": `Bearer ${openaiApiKey}`,
+              "Authorization": `Bearer ${llmApiKey}`,
             },
             body: JSON.stringify({
-              model: "gpt-5.2",
+              model: llmModel,
               messages: [
                 { role: "system", content: systemPrompt },
                 { role: "user", content: userPrompt },
@@ -187,29 +351,89 @@ DO NOT reference the sheet threshold. Provide your independent commercial assess
             }),
           });
 
-         // Replace it with this enhanced error logging:
-if (!response.ok) {
-  const errorText = await response.text();
-  console.error("OpenAI API Error Status:", response.status);
-  console.error("OpenAI API Error Details:", errorText);
-  
-  // Try to parse the error for more details
-  try {
-    const errorJson = JSON.parse(errorText);
-    console.error("OpenAI Error Code:", errorJson.error?.code);
-    console.error("OpenAI Error Message:", errorJson.error?.message);
-    console.error("OpenAI Error Type:", errorJson.error?.type);
-    console.error("OpenAI Error Param:", errorJson.error?.param);
-  } catch (e) {
-    // If it's not JSON, just log the raw text
-    console.error("Raw error response (not JSON):", errorText);
-  }
-  
-  throw new Error(`OpenAI API error: ${response.status} - ${errorText.substring(0, 200)}`);
-}
+          // Enhanced error handling for LLM Gateway
+          if (!response.ok) {
+            const errorText = await response.text();
+            console.error(`LLM Gateway Error for record ${record.eto_ofr_display_id}:`);
+            console.error("Status:", response.status);
+            console.error("Status Text:", response.statusText);
+            console.error("Response Body:", errorText);
+            
+            // Try to parse the error for more details
+            try {
+              const errorJson = JSON.parse(errorText);
+              console.error("LLM Gateway Error Code:", errorJson.error?.code);
+              console.error("LLM Gateway Error Message:", errorJson.error?.message);
+              console.error("LLM Gateway Error Type:", errorJson.error?.type);
+              
+              // Special handling for 401 errors
+              if (response.status === 401) {
+                throw new Error(`LLM Gateway authentication failed. Please check your LLM_GATEWAY_KEY. Details: ${errorJson.error?.message || 'Invalid API key'}`);
+              }
+            } catch (parseError) {
+              // If it's not JSON, just log the raw text
+              console.error("Raw error response:", errorText);
+            }
+            
+            throw new Error(`LLM Gateway error: ${response.status} - ${errorText.substring(0, 200)}`);
+          }
+
           const data = await response.json();
           const content = data.choices[0].message.content;
+          console.log(`LLM Gateway success for record ${record.eto_ofr_display_id}:`, content.substring(0, 100) + "...");
+
           const llmResponse = JSON.parse(content);
+
+          const buildEvaluationRationale = (): string => {
+            const parts: string[] = [];
+
+            parts.push(`EVALUATION SUMMARY FOR ${record.eto_ofr_display_id}:`);
+            parts.push("");
+
+            if (businessMcatKey === 1) {
+              parts.push("PRIMARY SIGNAL: Business MCAT Key = 1");
+              parts.push(`Status: ${indiamartOutcome === "PASS" ? "COMPLIANT" : "VIOLATION"}`);
+              parts.push(`Reason: ${indiamartReason}`);
+            } else if (!thresholdAvailable) {
+              parts.push("PRIMARY SIGNAL: Threshold Not Available");
+              parts.push(`Status: ${indiamartOutcome}`);
+              parts.push(`Reason: ${indiamartReason}`);
+            } else {
+              parts.push("EVALUATION PRIORITY HIERARCHY:");
+              parts.push(`1. BINDING THRESHOLD SIGNAL: ${indiamartCategory}`);
+              parts.push(`   - Quantity: ${record.quantity} ${record.quantity_unit} (converted: ${convertedQuantity.toFixed(2)} ${threshold?.gl_unit_name})`);
+              parts.push(`   - Threshold: ${cutoff} ${threshold?.gl_unit_name}`);
+              parts.push(`   - Status: ${indiamartOutcome === "PASS" ? "COMPLIANT" : "VIOLATION"}`);
+              parts.push("");
+
+              parts.push("2. SUPPORTING SIGNALS (Advisory Only):");
+              if (llmResponse.evaluation_signals) {
+                const signals = llmResponse.evaluation_signals;
+                if (signals.pov_signal) {
+                  parts.push(`   - POV Assessment: ${signals.pov_signal}`);
+                }
+                if (signals.buyer_intent_signal) {
+                  parts.push(`   - Buyer Intent: ${signals.buyer_intent_signal}`);
+                }
+                if (signals.product_type_assessment) {
+                  parts.push(`   - Product Type: ${signals.product_type_assessment}`);
+                }
+              }
+
+              parts.push("");
+              parts.push("CONFLICT RESOLUTION:");
+              if (llmResponse.conflict_notes) {
+                parts.push(`LLM Assessment Notes: ${llmResponse.conflict_notes}`);
+              }
+              parts.push(`Threshold-based verdict takes PRECEDENCE. Final outcome: ${indiamartOutcome === "PASS" ? "COMPLIANT" : "VIOLATION"}`);
+            }
+
+            parts.push("");
+            parts.push(`LLM INDEPENDENT ASSESSMENT: ${llmResponse.bl_type || "N/A"}`);
+            parts.push(`LLM Suggested Threshold: ${llmResponse.threshold_value || "N/A"}`);
+
+            return parts.join("\n");
+          };
 
           return {
             session_id: sessionId,
@@ -230,6 +454,7 @@ if (!response.ok) {
             llm_bl_type: llmResponse.bl_type || "Unknown",
             llm_threshold_value: llmResponse.threshold_value || "Not specified",
             llm_threshold_reason: llmResponse.reasoning || "No reasoning provided",
+            evaluation_rationale: buildEvaluationRationale(),
           };
         } catch (error) {
           console.error(`Error processing record ${record.eto_ofr_display_id}:`, error);
@@ -253,6 +478,7 @@ if (!response.ok) {
             llm_bl_type: "Error",
             llm_threshold_value: "Error",
             llm_threshold_reason: `Error processing with AI: ${error.message}`,
+            evaluation_rationale: `Error during LLM evaluation: ${error.message}`,
           };
         }
       });
