@@ -279,7 +279,7 @@ DO NOT reference the sheet threshold. Provide your independent commercial assess
           "Connection": "keep-alive" // Reuse connection
         },
         body: JSON.stringify({
-          model: "qwen/qwen3-32b",
+          model: "gpt-4o-mini",
           messages: [
             { role: "system", content: systemPrompt },
             { role: "user", content: userPrompt },
