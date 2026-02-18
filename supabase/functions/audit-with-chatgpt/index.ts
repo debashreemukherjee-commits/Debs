@@ -48,6 +48,27 @@ interface AuditResult {
   llm_bl_type: string;
   llm_threshold_value: string;
   llm_threshold_reason: string;
+  evaluation_rationale: string;
+}
+
+interface EvaluationSignals {
+  thresholdSignal: {
+    available: boolean;
+    verdict: string;
+    reason: string;
+  };
+  povSignal: {
+    value: string;
+    assessment: string;
+  };
+  buyerIntentSignal: {
+    extractedUse: string;
+    assessment: string;
+  };
+  productTypeSignal: {
+    category: string;
+    details: string;
+  };
 }
 
 Deno.serve(async (req: Request) => {
@@ -245,41 +266,53 @@ Deno.serve(async (req: Request) => {
           if (shouldBeRetail && markedAsRetail) {
             indiamartCategory = "Retail Correctly Marked";
             indiamartOutcome = "PASS";
-            indiamartReason = "";
+            indiamartReason = `Threshold-based evaluation: Quantity ${quantity} ${record.quantity_unit} (${convertedQuantity.toFixed(2)} ${threshold.gl_unit_name}) <= threshold ${cutoff} ${threshold.gl_unit_name}`;
           } else if (!shouldBeRetail && !markedAsRetail) {
             indiamartCategory = "Non-Retail Correctly Marked";
             indiamartOutcome = "PASS";
-            indiamartReason = "";
+            indiamartReason = `Threshold-based evaluation: Quantity ${quantity} ${record.quantity_unit} (${convertedQuantity.toFixed(2)} ${threshold.gl_unit_name}) > threshold ${cutoff} ${threshold.gl_unit_name}`;
           } else if (shouldBeRetail && !markedAsRetail) {
             indiamartCategory = "Non-Retail Wrongly Marked";
             indiamartOutcome = "ERROR";
-            indiamartReason = `Quantity ${quantity} ${record.quantity_unit} is within threshold ${cutoff} ${threshold.gl_unit_name} but system marked as Non-Retail`;
+            indiamartReason = `THRESHOLD VIOLATION: Quantity ${quantity} ${record.quantity_unit} (${convertedQuantity.toFixed(2)} ${threshold.gl_unit_name}) is within threshold ${cutoff} ${threshold.gl_unit_name} but system marked as Non-Retail`;
           } else {
             indiamartCategory = "Retail Wrongly Marked";
             indiamartOutcome = "ERROR";
-            indiamartReason = `Quantity ${quantity} ${record.quantity_unit} exceeds threshold ${cutoff} ${threshold.gl_unit_name} but system marked as Retail`;
+            indiamartReason = `THRESHOLD VIOLATION: Quantity ${quantity} ${record.quantity_unit} (${convertedQuantity.toFixed(2)} ${threshold.gl_unit_name}) exceeds threshold ${cutoff} ${threshold.gl_unit_name} but system marked as Retail`;
           }
         }
 
         const systemPrompt = `${auditPrompt}
 
-You are evaluating using LLM Logic ONLY. This is independent of system classification and sheet thresholds.
+You are providing a commercial assessment to SUPPORT the audit process. Your analysis is advisory and must NOT override threshold-based evaluation.
 
-Rules for LLM Logic:
-- Ignore system classification completely
-- Do NOT use MCAT thresholds from the provided sheet
-- Base your evaluation purely on human commercial logic and typical buying behavior
-- Consider market norms and practical usage patterns
-- This is an opinionated, advisory assessment
+CRITICAL CONFLICT RESOLUTION RULE:
+1. MCAT threshold is PRIMARY and BINDING
+2. Buyer intent is SUPPORTING signal only
+3. If intent conflicts with threshold → ALWAYS follow the threshold
+4. Business/office use alone does NOT imply Non-Retail unless threshold is breached
+
+Evaluation Priority (for your reasoning):
+1. Buyer Required Quantity vs MCAT Threshold (if available) - BINDING
+2. Probable Order Value (POV) - Supporting signal
+3. Buyer Intent / Usage Purpose - Supporting signal (Lowest Priority)
+4. Product Type & Supporting Communication - Context only
 
 Respond ONLY with a valid JSON object in this exact format:
 {
   "bl_type": "Retail" or "Non-Retail",
   "threshold_value": "suggested threshold with unit as string",
-  "reasoning": "1-2 sentences explaining typical consumer vs commercial buying behaviour for this product category"
+  "reasoning": "1-2 sentences explaining typical consumer vs commercial buying behaviour for this product category",
+  "evaluation_signals": {
+    "threshold_signal": "Assessment of quantity vs typical thresholds",
+    "pov_signal": "Assessment of probable order value implications",
+    "buyer_intent_signal": "Extracted use case and implications",
+    "product_type_assessment": "Category-specific retail vs non-retail indicators"
+  },
+  "conflict_notes": "Any conflicts between signals and how they should be resolved per the binding threshold rule"
 }`;
 
-        const userPrompt = `Evaluate this Buyer Lead using independent LLM commercial logic:
+        const userPrompt = `Evaluate this Buyer Lead using commercial logic. Remember: Threshold-based quantity evaluation is PRIMARY and BINDING.
 
 Record Details:
 - Buylead ID: ${record.eto_ofr_display_id}
@@ -287,8 +320,11 @@ Record Details:
 - Quantity Requested: ${record.quantity} ${record.quantity_unit}
 - Probable Order Value: ${record.probable_order_value}
 - Buyer Details: ${record.bl_details}
+- Current System Classification: ${markedAsRetail ? "Retail" : "Non-Retail"}
+- Threshold Available: ${thresholdAvailable}
+${thresholdAvailable ? `- MCAT Threshold: ${cutoff} ${threshold?.gl_unit_name}` : ""}
 
-DO NOT reference the sheet threshold. Provide your independent commercial assessment.`;
+Provide your independent commercial assessment. Note: Your assessment is ADVISORY. If it conflicts with the threshold-based evaluation, the threshold-based evaluation takes precedence.`;
 
         try {
           console.log(`Calling Lite LLM Gateway for record ${record.eto_ofr_display_id}`);
@@ -342,8 +378,59 @@ DO NOT reference the sheet threshold. Provide your independent commercial assess
           const data = await response.json();
           const content = data.choices[0].message.content;
           console.log(`LLM Gateway success for record ${record.eto_ofr_display_id}:`, content.substring(0, 100) + "...");
-          
+
           const llmResponse = JSON.parse(content);
+
+          const buildEvaluationRationale = (): string => {
+            const parts: string[] = [];
+
+            parts.push(`EVALUATION SUMMARY FOR ${record.eto_ofr_display_id}:`);
+            parts.push("");
+
+            if (businessMcatKey === 1) {
+              parts.push("PRIMARY SIGNAL: Business MCAT Key = 1");
+              parts.push(`Status: ${indiamartOutcome === "PASS" ? "COMPLIANT" : "VIOLATION"}`);
+              parts.push(`Reason: ${indiamartReason}`);
+            } else if (!thresholdAvailable) {
+              parts.push("PRIMARY SIGNAL: Threshold Not Available");
+              parts.push(`Status: ${indiamartOutcome}`);
+              parts.push(`Reason: ${indiamartReason}`);
+            } else {
+              parts.push("EVALUATION PRIORITY HIERARCHY:");
+              parts.push(`1. BINDING THRESHOLD SIGNAL: ${indiamartCategory}`);
+              parts.push(`   - Quantity: ${quantity} ${record.quantity_unit} (converted: ${convertedQuantity.toFixed(2)} ${threshold?.gl_unit_name})`);
+              parts.push(`   - Threshold: ${cutoff} ${threshold?.gl_unit_name}`);
+              parts.push(`   - Status: ${indiamartOutcome === "PASS" ? "COMPLIANT" : "VIOLATION"}`);
+              parts.push("");
+
+              parts.push("2. SUPPORTING SIGNALS (Advisory Only):");
+              if (llmResponse.evaluation_signals) {
+                const signals = llmResponse.evaluation_signals;
+                if (signals.pov_signal) {
+                  parts.push(`   - POV Assessment: ${signals.pov_signal}`);
+                }
+                if (signals.buyer_intent_signal) {
+                  parts.push(`   - Buyer Intent: ${signals.buyer_intent_signal}`);
+                }
+                if (signals.product_type_assessment) {
+                  parts.push(`   - Product Type: ${signals.product_type_assessment}`);
+                }
+              }
+
+              parts.push("");
+              parts.push("CONFLICT RESOLUTION:");
+              if (llmResponse.conflict_notes) {
+                parts.push(`LLM Assessment Notes: ${llmResponse.conflict_notes}`);
+              }
+              parts.push(`Threshold-based verdict takes PRECEDENCE. Final outcome: ${indiamartOutcome === "PASS" ? "COMPLIANT" : "VIOLATION"}`);
+            }
+
+            parts.push("");
+            parts.push(`LLM INDEPENDENT ASSESSMENT: ${llmResponse.bl_type || "N/A"}`);
+            parts.push(`LLM Suggested Threshold: ${llmResponse.threshold_value || "N/A"}`);
+
+            return parts.join("\n");
+          };
 
           return {
             session_id: sessionId,
@@ -364,6 +451,7 @@ DO NOT reference the sheet threshold. Provide your independent commercial assess
             llm_bl_type: llmResponse.bl_type || "Unknown",
             llm_threshold_value: llmResponse.threshold_value || "Not specified",
             llm_threshold_reason: llmResponse.reasoning || "No reasoning provided",
+            evaluation_rationale: buildEvaluationRationale(),
           };
         } catch (error) {
           console.error(`Error processing record ${record.eto_ofr_display_id}:`, error);
@@ -387,6 +475,7 @@ DO NOT reference the sheet threshold. Provide your independent commercial assess
             llm_bl_type: "Error",
             llm_threshold_value: "Error",
             llm_threshold_reason: `Error processing with AI: ${error.message}`,
+            evaluation_rationale: `Error during LLM evaluation: ${error.message}`,
           };
         }
       });
