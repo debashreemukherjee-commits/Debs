@@ -49,3 +49,19 @@ BEGIN
     ALTER TABLE audit_results ALTER COLUMN llm_threshold_value TYPE text USING llm_threshold_value::text;
   END IF;
 END $$;
+
+-- Add the column if it doesn't exist (with explicit error handling)
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 
+        FROM information_schema.columns 
+        WHERE table_name = 'audit_results' 
+        AND column_name = 'evaluation_rationale'
+    ) THEN
+        ALTER TABLE audit_results ADD COLUMN evaluation_rationale TEXT;
+        RAISE NOTICE 'Column evaluation_rationale added successfully';
+    ELSE
+        RAISE NOTICE 'Column evaluation_rationale already exists';
+    END IF;
+END $$;
