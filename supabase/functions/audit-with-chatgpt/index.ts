@@ -51,26 +51,6 @@ interface AuditResult {
   evaluation_rationale: string;
 }
 
-interface EvaluationSignals {
-  thresholdSignal: {
-    available: boolean;
-    verdict: string;
-    reason: string;
-  };
-  povSignal: {
-    value: string;
-    assessment: string;
-  };
-  buyerIntentSignal: {
-    extractedUse: string;
-    assessment: string;
-  };
-  productTypeSignal: {
-    category: string;
-    details: string;
-  };
-}
-
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, {
@@ -80,17 +60,20 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    // Lite LLM Gateway configuration
+    // LLM Gateway configuration - following the template exactly
     const llmApiKey = Deno.env.get("LLM_GATEWAY_KEY");
     if (!llmApiKey) {
       console.error("LLM_GATEWAY_KEY environment variable is not set");
-      throw new Error("LLM_GATEWAY_KEY is not configured. Please set it in your Supabase Edge Function secrets.");
+      console.error("Please set it in your Supabase Edge Function secrets or local .env file");
+      throw new Error("LLM_GATEWAY_KEY environment variable is not set. Please configure it in your Supabase Edge Function secrets.");
     }
 
+    // Following the template: openai.api_key = "sk-xxx"
+    // and openai.base_url = "https://imllm.intermesh.net/v1"
     const llmBaseUrl = "https://imllm.intermesh.net/v1";
     const llmModel = "qwen/qwen3-32b";
 
-    console.log(`LLM Gateway configured: URL=${llmBaseUrl}, Model=${llmModel}`);
+    console.log(`LLM Gateway configured successfully with base URL: ${llmBaseUrl}`);
 
     const { sessionId, auditPrompt, rawData, thresholdData }: AuditRequest = await req.json();
 
@@ -230,18 +213,17 @@ Deno.serve(async (req: Request) => {
         const markedAsRetail = segment?.toLowerCase() === "retail - indian" ||
                        segment?.toLowerCase() === "retail - foreign";
 
-        // Declare variables at the top of the function scope
         let mcatType = "Standard MCAT";
         let indiamartOutcome = "PASS";
         let indiamartCategory = "";
         let indiamartReason = "";
         let thresholdValue = "NA";
-        let cutoff = 0; // Initialize cutoff
-        let convertedQuantity = 0; // Initialize convertedQuantity
+        let cutoff = 0;
+        let convertedQuantity = 0;
 
         if (thresholdAvailable && threshold) {
           thresholdValue = `${threshold.leap_retail_qty_cutoff} ${threshold.gl_unit_name}`;
-          cutoff = threshold.leap_retail_qty_cutoff; // Store cutoff value
+          cutoff = threshold.leap_retail_qty_cutoff;
         }
 
         if (businessMcatKey === 1) {
@@ -307,7 +289,6 @@ Respond ONLY with a valid JSON object in this exact format:
   "threshold_value": "suggested threshold with unit as string",
   "reasoning": "1-2 sentences explaining typical consumer vs commercial buying behaviour for this product category",
   "evaluation_signals": {
-    "threshold_signal": "Assessment of quantity vs typical thresholds",
     "pov_signal": "Assessment of probable order value implications",
     "buyer_intent_signal": "Extracted use case and implications",
     "product_type_assessment": "Category-specific retail vs non-retail indicators"
@@ -330,13 +311,17 @@ ${thresholdAvailable ? `- MCAT Threshold: ${cutoff} ${threshold?.gl_unit_name}` 
 Provide your independent commercial assessment. Note: Your assessment is ADVISORY. If it conflicts with the threshold-based evaluation, the threshold-based evaluation takes precedence.`;
 
         try {
-          console.log(`Calling Lite LLM Gateway for record ${record.eto_ofr_display_id}`);
+          console.log(`Calling LLM Gateway for record ${record.eto_ofr_display_id}`);
+          console.log(`Using API Key: ${llmApiKey.substring(0, 5)}...`); // Log partial key for debugging
 
+          // Following the template exactly:
+          // openai.api_key = "sk-xxx"
+          // openai.base_url = "https://imllm.intermesh.net/v1"
           const response = await fetch(`${llmBaseUrl}/chat/completions`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "Authorization": `Bearer ${llmApiKey}`,
+              "Authorization": `Bearer ${llmApiKey}`, // This matches "sk-xxx" format
             },
             body: JSON.stringify({
               model: llmModel,
@@ -357,27 +342,36 @@ Provide your independent commercial assessment. Note: Your assessment is ADVISOR
             console.error("Status Text:", response.statusText);
             console.error("Response Body:", errorText);
 
-            try {
-              const errorJson = JSON.parse(errorText);
-              console.error("LLM Gateway Error Code:", errorJson.error?.code);
-              console.error("LLM Gateway Error Message:", errorJson.error?.message);
-              console.error("LLM Gateway Error Type:", errorJson.error?.type);
-
-              if (response.status === 401) {
-                throw new Error(`LLM Gateway authentication failed. Please check your LLM_GATEWAY_KEY. Details: ${errorJson.error?.message || 'Invalid API key'}`);
-              }
-            } catch (parseError) {
-              console.error("Raw error response:", errorText);
+            // Handle specific error cases
+            if (response.status === 401) {
+              throw new Error(`Authentication failed: Invalid LLM_GATEWAY_KEY. Please check your API key format (should start with 'sk-')`);
+            } else if (response.status === 404) {
+              throw new Error(`LLM Gateway endpoint not found. Please verify the base URL: ${llmBaseUrl}`);
+            } else if (response.status === 429) {
+              throw new Error(`Rate limit exceeded for LLM Gateway`);
             }
 
             throw new Error(`LLM Gateway error: ${response.status} - ${errorText.substring(0, 200)}`);
           }
 
           const data = await response.json();
-          const content = data.choices[0].message.content;
-          console.log(`LLM Gateway success for record ${record.eto_ofr_display_id}:`, content.substring(0, 100) + "...");
+          
+          // Validate response structure
+          if (!data.choices || !data.choices[0] || !data.choices[0].message) {
+            console.error("Unexpected LLM Gateway response structure:", data);
+            throw new Error("Invalid response structure from LLM Gateway");
+          }
 
-          const llmResponse = JSON.parse(content);
+          const content = data.choices[0].message.content;
+          console.log(`LLM Gateway success for record ${record.eto_ofr_display_id}`);
+
+          let llmResponse;
+          try {
+            llmResponse = JSON.parse(content);
+          } catch (parseError) {
+            console.error("Failed to parse LLM response as JSON:", content);
+            throw new Error("LLM response was not valid JSON");
+          }
 
           const buildEvaluationRationale = (): string => {
             const parts: string[] = [];
@@ -483,7 +477,14 @@ Provide your independent commercial assessment. Note: Your assessment is ADVISOR
     }
 
     return new Response(
-      JSON.stringify({ success: true, results: auditResults }),
+      JSON.stringify({ 
+        success: true, 
+        results: auditResults,
+        metadata: {
+          total_records: auditResults.length,
+          llm_gateway_configured: true
+        }
+      }),
       {
         headers: {
           ...corsHeaders,
@@ -496,7 +497,8 @@ Provide your independent commercial assessment. Note: Your assessment is ADVISOR
     return new Response(
       JSON.stringify({
         success: false,
-        error: error.message || "An error occurred during audit processing"
+        error: error.message || "An error occurred during audit processing",
+        solution: "Please ensure LLM_GATEWAY_KEY is set in your Supabase Edge Function secrets. It should be in the format 'sk-xxx'"
       }),
       {
         status: 500,
